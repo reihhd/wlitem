@@ -5,30 +5,15 @@
     "note": "Whitelist item + real value untuk dibandingkan dengan harga booth"
   },
   "items": {
-    "abyssal blade": {
-      "value": 176,
+    "Prince Blade": {
+      "value": 2834,
       "category": "sword",
       "finisher": false
     },
-    "aetherial azure katana": {
-      "value": 450,
+  "Witch's Curse": {
+      "value": 3240,
       "category": "sword",
-      "finisher": true
-    },
-    "black ninja katana": {
-      "value": 1200,
-      "category": "sword",
-      "finisher": true
-    },
-    "e dance": {
-      "value": 85,
-      "category": "emote",
       "finisher": false
     },
-    "2024 explosion": {
-      "value": 300,
-      "category": "explosion",
-      "finisher": false
-    }
   }
 }
