@@ -6,12 +6,12 @@
   },
   "items": {
     "prince blade": {
-      "value": 2834,
+      "value": 1,
       "category": "sword",
       "finisher": false
     },
     "witch's curse": {
-      "value": 3240,
+      "value": 1,
       "category": "sword",
       "finisher": false
     }
