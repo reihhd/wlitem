@@ -5,15 +5,15 @@
     "note": "Whitelist item + real value untuk dibandingkan dengan harga booth"
   },
   "items": {
-    "Prince Blade": {
+    "prince blade": {
       "value": 2834,
       "category": "sword",
       "finisher": false
     },
-  "Witch's Curse": {
+    "witch's curse": {
       "value": 3240,
       "category": "sword",
       "finisher": false
-    },
+    }
   }
 }
