@@ -1,0 +1,34 @@
+{
+  "_meta": {
+    "source": "bbvalues.uk",
+    "lastUpdated": "2026-09-20",
+    "note": "Whitelist item + real value untuk dibandingkan dengan harga booth"
+  },
+  "items": {
+    "abyssal blade": {
+      "value": 176,
+      "category": "sword",
+      "finisher": false
+    },
+    "aetherial azure katana": {
+      "value": 450,
+      "category": "sword",
+      "finisher": true
+    },
+    "black ninja katana": {
+      "value": 1200,
+      "category": "sword",
+      "finisher": true
+    },
+    "e dance": {
+      "value": 85,
+      "category": "emote",
+      "finisher": false
+    },
+    "2024 explosion": {
+      "value": 300,
+      "category": "explosion",
+      "finisher": false
+    }
+  }
+}
