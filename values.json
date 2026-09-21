@@ -194,6 +194,41 @@
       "value": 1543,
       "category": "emote",
       "finisher": false
+    },
+    "abyssal blade": {
+      "value": 1544,
+      "category": "sword",
+      "finisher": false
+    },
+    "red moon katana": {
+      "value": 3186,
+      "category": "sword",
+      "finisher": false
+    },
+    "rose gift": {
+      "value": 11000,
+      "category": "accessory",
+      "finisher": false
+    },
+    "luna bala": {
+      "value": 2600,
+      "category": "item",
+      "finisher": false
+    },
+    "dancinha": {
+      "value": 3400,
+      "category": "emote",
+      "finisher": false
+    },
+    "criss cross": {
+      "value": 2100,
+      "category": "emote",
+      "finisher": false
+    },
+    "sitting": {
+      "value": 2600,
+      "category": "emote",
+      "finisher": false
     }
   }
 }
