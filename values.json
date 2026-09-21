@@ -229,6 +229,11 @@
       "value": 2600,
       "category": "emote",
       "finisher": false
+    },
+    "crimson kagune": {
+      "value": 3999,
+      "category": "emote",
+      "finisher": false
     }
   }
 }
