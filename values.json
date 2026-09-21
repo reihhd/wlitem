@@ -151,7 +151,7 @@
       "finisher": false
     },
     "flaming sword": {
-      "value": 2682,
+      "value": 3000,
       "category": "sword",
       "finisher": false
     },
@@ -183,6 +183,16 @@
     "trust fall": {
       "value": 821,
       "category": "duo emote",
+      "finisher": false
+    },
+    "look at me!": {
+      "value": 1166,
+      "category": "emote",
+      "finisher": false
+    },
+    "popular": {
+      "value": 1543,
+      "category": "emote",
       "finisher": false
     }
   }
