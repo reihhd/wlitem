@@ -1,18 +1,188 @@
 {
   "_meta": {
     "source": "rei",
-    "lastUpdated": "2026-09-20",
+    "lastUpdated": "2026-09-21",
     "note": "mbud"
   },
   "items": {
     "prince blade": {
-      "value": 9999,
+      "value": 2824,
       "category": "sword",
       "finisher": false
     },
     "witch's curse": {
-      "value": 9999,
+      "value": 3160,
       "category": "sword",
+      "finisher": false
+    },
+    "emperor blade": {
+      "value": 1150,
+      "category": "sword",
+      "finisher": false
+    },
+    "neo-neko katana": {
+      "value": 642,
+      "category": "sword",
+      "finisher": false
+    },
+    "final phase": {
+      "value": 478,
+      "category": "sword",
+      "finisher": false
+    },
+    "nebula blade": {
+      "value": 1095,
+      "category": "sword",
+      "finisher": false
+    },
+    "pearl angel katana": {
+      "value": 3621,
+      "category": "sword",
+      "finisher": false
+    },
+    "purity blade": {
+      "value": 368,
+      "category": "sword",
+      "finisher": false
+    },
+    "hellchain blade": {
+      "value": 366,
+      "category": "sword",
+      "finisher": false
+    },
+    "death call blade": {
+      "value": 366,
+      "category": "sword",
+      "finisher": false
+    },
+    "strawberry cake blade": {
+      "value": 374,
+      "category": "sword",
+      "finisher": false
+    },
+    "gravebone blade": {
+      "value": 380,
+      "category": "sword",
+      "finisher": false
+    },
+    "lumen petal": {
+      "value": 394,
+      "category": "sword",
+      "finisher": false
+    },
+    "hazy katana": {
+      "value": 420,
+      "category": "sword",
+      "finisher": false
+    },
+    "runic redblade": {
+      "value": 413,
+      "category": "sword",
+      "finisher": false
+    },
+    "sinister blade": {
+      "value": 454,
+      "category": "sword",
+      "finisher": false
+    },
+    "rosarium blade": {
+      "value": 460,
+      "category": "sword",
+      "finisher": false
+    },
+    "wicked reaper": {
+      "value": 475,
+      "category": "sword",
+      "finisher": false
+    },
+    "corrupted loveblade": {
+      "value": 477,
+      "category": "sword",
+      "finisher": false
+    },
+    "y2k blade": {
+      "value": 535,
+      "category": "sword",
+      "finisher": false
+    },
+    "golden fang": {
+      "value": 539,
+      "category": "sword",
+      "finisher": false
+    },
+    "black cat blade": {
+      "value": 565,
+      "category": "sword",
+      "finisher": false
+    },
+    "samurai katana": {
+      "value": 567,
+      "category": "sword",
+      "finisher": false
+    },
+    "orbit spear": {
+      "value": 587,
+      "category": "sword",
+      "finisher": false
+    },
+    "rose blade": {
+      "value": 650,
+      "category": "sword",
+      "finisher": false
+    },
+    "wind thorn": {
+      "value": 837,
+      "category": "sword",
+      "finisher": false
+    },
+    "golden rapier": {
+      "value": 1442,
+      "category": "sword",
+      "finisher": false
+    },
+    "north blade": {
+      "value": 1539,
+      "category": "sword",
+      "finisher": false
+    },
+    "crystal greatblade": {
+      "value": 2058,
+      "category": "sword",
+      "finisher": false
+    },
+    "flaming sword": {
+      "value": 2682,
+      "category": "sword",
+      "finisher": false
+    },
+    "void blade": {
+      "value": 1849,
+      "category": "sword",
+      "finisher": false
+    },
+    "lily katana": {
+      "value": 4547,
+      "category": "sword",
+      "finisher": false
+    },
+    "snowfall dance": {
+      "value": 393,
+      "category": "emote",
+      "finisher": false
+    },
+    "wait...": {
+      "value": 452,
+      "category": "emote",
+      "finisher": false
+    },
+    "parrot dance": {
+      "value": 487,
+      "category": "emote",
+      "finisher": false
+    },
+    "trust fall": {
+      "value": 821,
+      "category": "duo emote",
       "finisher": false
     }
   }
