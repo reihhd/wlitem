@@ -8,7 +8,8 @@ local HttpService     = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 
 -- ── CONFIG ────────────────────────────────────────────────────────────────────
-local PLACE_ID    = game.PlaceId
+local ROOT_PLACE_ID = 13866929223 -- Blade Ball plaza (root place)
+local PLACE_ID      = ROOT_PLACE_ID -- always use root for server list & teleport
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1510395545141907478/cN3zzPCevXKBL4nEBefV7Z6m_ufHSUYjlBHKyPK8sZGl2VufTkamnNpxL58DWvF5z7hs"
 local VALUES_URL  = "http://hyper.ypnode.my.id:10750/values.json" -- server-hosted, no ngrok
 local SCANS_URL   = "http://hyper.ypnode.my.id:10750/scans"       -- POST scan results for dashboard
@@ -260,32 +261,56 @@ end
 
 -- ── SERVER HOP ────────────────────────────────────────────────────────────────
 
-local function getServerList()
-    local servers = {}
-    local cursor = ""
-    local maxPages = 5 -- fetch up to 500 servers
-    for page = 1, maxPages do
-        local url = string.format(
-            "https://games.roblox.com/v1/games/%d/servers/Public?limit=100%s",
-            PLACE_ID,
-            cursor ~= "" and ("&cursor=" .. cursor) or ""
-        )
+local function fetchServerPage(url)
+    for attempt = 1, 3 do
         local body = httpGet(url)
-        if not body then break end
-        local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
-        if not ok or not data or not data.data then break end
-        for _, s in ipairs(data.data) do
-            if s.playing and s.maxPlayers and s.playing < s.maxPlayers then
-                table.insert(servers, { jobId = s.id, players = s.playing, maxPlayers = s.maxPlayers })
-            end
+        if body and (body:sub(1, 1) == "{" or body:sub(1, 1) == "[") then
+            local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+            if ok and data and data.data then return data end
         end
-        -- check for next page
-        if not data.nextPageCursor or data.nextPageCursor == "" then break end
-        cursor = data.nextPageCursor
-        task.wait(0.2) -- rate limit
+        warn("[hop] Page fetch attempt " .. attempt .. " failed, retrying in " .. (attempt * 2) .. "s")
+        task.wait(attempt * 2)
     end
-    print("[hop] Fetched " .. #servers .. " servers")
-    return servers
+    return nil
+end
+
+local function getServerList()
+    -- Retry the entire server list fetch up to 3 times
+    for fullAttempt = 1, 3 do
+        local servers = {}
+        local cursor = ""
+        local maxPages = 5
+        local failed = false
+        for page = 1, maxPages do
+            local url = string.format(
+                "https://games.roblox.com/v1/games/%s/servers/Public?limit=100%s",
+                tostring(PLACE_ID),
+                cursor ~= "" and ("&cursor=" .. cursor) or ""
+            )
+            local data = fetchServerPage(url)
+            if not data then
+                warn("[hop] Failed to fetch page " .. page .. " on attempt " .. fullAttempt)
+                failed = true
+                break
+            end
+            for _, s in ipairs(data.data) do
+                if s.playing and s.maxPlayers and s.id and s.playing < s.maxPlayers then
+                    table.insert(servers, { jobId = s.id, players = s.playing, maxPlayers = s.maxPlayers })
+                end
+            end
+            if not data.nextPageCursor or data.nextPageCursor == "" then break end
+            cursor = data.nextPageCursor
+            task.wait(0.5)
+        end
+        if not failed and #servers > 0 then
+            print("[hop] Fetched " .. #servers .. " servers (attempt " .. fullAttempt .. ")")
+            return servers
+        end
+        warn("[hop] Full attempt " .. fullAttempt .. " got " .. #servers .. " servers, retrying in 5s")
+        task.wait(5)
+    end
+    warn("[hop] All 3 attempts failed, returning empty")
+    return {}
 end
 
 local function joinServer(jobId)
@@ -295,14 +320,30 @@ end
 
 local function pickNextServer()
     local servers = getServerList()
-    if #servers == 0 then return nil end
+    if #servers == 0 then
+        warn("[hop] getServerList returned 0 servers")
+        return nil
+    end
+    print("[hop] pickNextServer: " .. #servers .. " candidates, history=" .. #hopHistory)
     -- sort by most players first (more booths)
     table.sort(servers, function(a, b) return a.players > b.players end)
     local currentJob = game.JobId
+    -- First pass: skip current, history, and already-scanned servers
     for _, s in ipairs(servers) do
-        if s.jobId ~= currentJob and not isInHistory(s.jobId) then return s.jobId end
+        if s.jobId ~= currentJob and not isInHistory(s.jobId) and not isServerScanned(s.jobId) then
+            print("[hop] Picked unscanned server: " .. s.jobId:sub(1, 8) .. " (" .. s.players .. " players)")
+            return s.jobId
+        end
     end
-    warn("[hop] All servers in history, resetting")
+    -- Second pass: allow already-scanned but not in history (scanned expires after 5min)
+    for _, s in ipairs(servers) do
+        if s.jobId ~= currentJob and not isInHistory(s.jobId) then
+            print("[hop] Picked server (may be re-scan): " .. s.jobId:sub(1, 8))
+            return s.jobId
+        end
+    end
+    -- All in history — reset and try again
+    warn("[hop] All " .. #servers .. " servers in history, resetting")
     hopHistory = {}
     saveHopHistory()
     for _, s in ipairs(servers) do
@@ -354,17 +395,17 @@ local function startAutoScan()
                         task.wait(1)
                         joinServer(nextServer)
                         -- Wait for teleport to complete or fail
-                        task.wait(10)
+                        task.wait(5)
                         -- If still here, teleport failed
                         if game.JobId == currentJob then
                             isTeleporting = false
                             warn("[hop] Teleport failed, waiting before retry")
-                            Library:Notify({ Title = "Auto Hop", Description = "Teleport failed, retry in 15s", Time = 5 })
-                            task.wait(15)
+                            Library:Notify({ Title = "Auto Hop", Description = "Teleport failed, retry in 5", Time = 5 })
+                            task.wait(5)
                         end
                     else
-                        Library:Notify({ Title = "Auto Hop", Description = "No servers available, retry in 30s", Time = 5 })
-                        task.wait(30)
+                        Library:Notify({ Title = "Auto Hop", Description = "No servers available, retry in 5", Time = 5 })
+                        task.wait(5)
                     end
                 else
                     -- No auto hop, just wait
@@ -415,12 +456,12 @@ scanAllBooths = function(values)
     local results = {}
     local boothCount, underrapCount = 0, 0
     local joinLink = string.format(
-        "https://www.roblox.com/games/start?placeId=%d&gameInstanceId=%s",
-        PLACE_ID, currentJobId
+        "https://www.roblox.com/games/start?placeId=%s&gameInstanceId=%s",
+        tostring(PLACE_ID), currentJobId
     )
     local deepLink = string.format(
-        "roblox://experiences/start?placeId=%d&gameInstanceId=%s",
-        PLACE_ID, currentJobId
+        "roblox://placeId=%s&gameInstanceId=%s",
+        tostring(PLACE_ID), currentJobId
     )
 
     for _, booth in ipairs(stands:GetChildren()) do
@@ -482,8 +523,8 @@ scanAllBooths = function(values)
                             { name = "👤 Seller",    value = string.format("[%s](https://www.roblox.com/users/%s/profile)", username, tostring(ownerId)), inline = true },
                             { name = "🔗 Join Server", value = string.format("[Click to Join](%s)", joinLink), inline = true },
                             { name = "📋 Join Script", value = string.format(
-                                "```lua\ngame:GetService(\"TeleportService\"):TeleportToPlaceInstance(%d, \"%s\", game.Players.LocalPlayer)\n```",
-                                PLACE_ID, currentJobId
+                                "```lua\ngame:GetService(\"TeleportService\"):TeleportToPlaceInstance(%s, \"%s\", game.Players.LocalPlayer)\n```",
+                                tostring(PLACE_ID), currentJobId
                             ), inline = false },
                             { name = "🌐 Join (Tanpa Executor)", value = string.format(
                                 "Copy lalu paste ke address bar browser:\n```\n%s\n```", deepLink
@@ -529,23 +570,32 @@ scanAllBooths = function(values)
 
     if autoHopEnabled then
         task.wait(1)
-        Library:Notify({ Title = "Auto Hop", Description = "Finding next server...", Time = 3 })
-        local nextServer = pickNextServer()
-        if nextServer then
-            isTeleporting = true
-            task.wait(2)
-            joinServer(nextServer)
-            -- Wait and check if teleport succeeded
-            task.wait(10)
-            if game.JobId == currentJobId then
-                -- Still in same server = teleport failed
-                isTeleporting = false
-                warn("[hop] Teleport failed, server already scanned")
-                Library:Notify({ Title = "Auto Hop", Description = "Teleport failed, retry in 15s", Time = 5 })
-                task.wait(15)
+        -- Retry hop up to 5 times if teleport fails
+        for hopAttempt = 1, 5 do
+            Library:Notify({ Title = "Auto Hop", Description = string.format("Finding server... (attempt %d/5)", hopAttempt), Time = 3 })
+            local nextServer = pickNextServer()
+            if not nextServer then
+                Library:Notify({ Title = "Auto Hop", Description = "No servers, retry in 10s", Time = 5 })
+                task.wait(10)
+                continue
             end
-        else
-            Library:Notify({ Title = "Auto Hop", Description = "No servers available", Time = 5 })
+            isTeleporting = true
+            task.wait(1)
+            joinServer(nextServer)
+            task.wait(8)
+            if game.JobId ~= currentJobId then
+                -- Teleport succeeded
+                break
+            end
+            -- Still here = teleport failed, try another server
+            isTeleporting = false
+            warn("[hop] Teleport failed attempt " .. hopAttempt .. ", trying another server")
+            addToHistory(nextServer) -- skip this broken server
+            task.wait(3)
+        end
+        if game.JobId == currentJobId then
+            isTeleporting = false
+            Library:Notify({ Title = "Auto Hop", Description = "All hop attempts failed, retry in 30s", Time = 5 })
         end
     end
 end
@@ -597,9 +647,17 @@ MainGroup:AddToggle("AutoScan", {
 MainGroup:AddToggle("AutoHop", {
     Default = false,
     Text = "Auto Change Server",
-    Tooltip = string.format("Hop to next server after scan (skip last %d)", HOP_SKIP_COUNT),
+    Tooltip = string.format("Hop to next server after scan (skip last %d). Works with or without Auto Scan.", HOP_SKIP_COUNT),
     Callback = function(val)
         autoHopEnabled = val
+        -- If auto hop enabled but auto scan is not running, start auto scan too
+        -- (auto hop needs the scan loop to function)
+        if val and not autoScanEnabled then
+            autoScanEnabled = true
+            Toggles.AutoScan:SetValue(true)
+            startAutoScan()
+            Library:Notify({ Title = "Auto Hop", Description = "Auto Scan enabled automatically", Time = 3 })
+        end
     end,
 })
 
@@ -702,6 +760,17 @@ SaveManager:LoadAutoloadConfig()
 
 loadHopHistory()
 loadScannedServers()
+
+-- ── AUTO TELEPORT TO PLAZA ────────────────────────────────────────────────────
+-- If we're in a sub-place (not the root plaza), teleport back to plaza
+if game.PlaceId ~= ROOT_PLACE_ID then
+    Library:Notify({ Title = "Wrong Place", Description = "Teleporting to Plaza...", Time = 5 })
+    warn("[init] Current PlaceId=" .. tostring(game.PlaceId) .. " != ROOT=" .. tostring(ROOT_PLACE_ID) .. ", teleporting to plaza")
+    task.wait(2)
+    TeleportService:Teleport(ROOT_PLACE_ID, LocalPlayer)
+    -- Script will restart after teleport, so stop here
+    return
+end
 
 Library:Notify({ Title = "Booth Scanner", Description = "Loaded", Time = 3 })
 
