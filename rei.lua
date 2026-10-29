@@ -261,25 +261,32 @@ end
 
 -- ── SERVER HOP ────────────────────────────────────────────────────────────────
 
+local cachedServerList = {}
+local cachedServerTime = 0
+local CACHE_TTL = 15 -- cache server list for 15 seconds
+
 local function fetchServerPage(url)
-    for attempt = 1, 3 do
+    for attempt = 1, 2 do
         local body = httpGet(url)
         if body and (body:sub(1, 1) == "{" or body:sub(1, 1) == "[") then
             local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
             if ok and data and data.data then return data end
         end
-        warn("[hop] Page fetch attempt " .. attempt .. " failed, retrying in " .. (attempt * 2) .. "s")
-        task.wait(attempt * 2)
+        warn("[hop] Page fetch attempt " .. attempt .. " failed, retrying in " .. attempt .. "s")
+        task.wait(attempt)
     end
     return nil
 end
 
-local function getServerList()
-    -- Retry the entire server list fetch up to 3 times
-    for fullAttempt = 1, 3 do
+local function getServerList(forceRefresh)
+    -- Return cached if fresh enough
+    if not forceRefresh and #cachedServerList > 0 and (os.time() - cachedServerTime) < CACHE_TTL then
+        return cachedServerList
+    end
+    for fullAttempt = 1, 2 do
         local servers = {}
         local cursor = ""
-        local maxPages = 5
+        local maxPages = 3 -- 300 servers is enough, faster
         local failed = false
         for page = 1, maxPages do
             local url = string.format(
@@ -289,7 +296,7 @@ local function getServerList()
             )
             local data = fetchServerPage(url)
             if not data then
-                warn("[hop] Failed to fetch page " .. page .. " on attempt " .. fullAttempt)
+                warn("[hop] Failed page " .. page .. " attempt " .. fullAttempt)
                 failed = true
                 break
             end
@@ -300,16 +307,18 @@ local function getServerList()
             end
             if not data.nextPageCursor or data.nextPageCursor == "" then break end
             cursor = data.nextPageCursor
-            task.wait(0.5)
+            task.wait(0.3)
         end
         if not failed and #servers > 0 then
-            print("[hop] Fetched " .. #servers .. " servers (attempt " .. fullAttempt .. ")")
+            print("[hop] Fetched " .. #servers .. " servers")
+            cachedServerList = servers
+            cachedServerTime = os.time()
             return servers
         end
-        warn("[hop] Full attempt " .. fullAttempt .. " got " .. #servers .. " servers, retrying in 5s")
-        task.wait(5)
+        warn("[hop] Attempt " .. fullAttempt .. " got 0 servers, retrying in 3s")
+        task.wait(3)
     end
-    warn("[hop] All 3 attempts failed, returning empty")
+    warn("[hop] All attempts failed")
     return {}
 end
 
@@ -318,38 +327,66 @@ local function joinServer(jobId)
     TeleportService:TeleportToPlaceInstance(PLACE_ID, jobId, LocalPlayer)
 end
 
-local function pickNextServer()
-    local servers = getServerList()
+local function pickNextServer(forceRefresh)
+    local servers = getServerList(forceRefresh)
     if #servers == 0 then
         warn("[hop] getServerList returned 0 servers")
         return nil
     end
-    print("[hop] pickNextServer: " .. #servers .. " candidates, history=" .. #hopHistory)
     -- sort by most players first (more booths)
     table.sort(servers, function(a, b) return a.players > b.players end)
     local currentJob = game.JobId
     -- First pass: skip current, history, and already-scanned servers
     for _, s in ipairs(servers) do
         if s.jobId ~= currentJob and not isInHistory(s.jobId) and not isServerScanned(s.jobId) then
-            print("[hop] Picked unscanned server: " .. s.jobId:sub(1, 8) .. " (" .. s.players .. " players)")
+            print("[hop] Picked unscanned: " .. s.jobId:sub(1, 8) .. " (" .. s.players .. "p)")
             return s.jobId
         end
     end
-    -- Second pass: allow already-scanned but not in history (scanned expires after 5min)
+    -- Second pass: allow already-scanned but not in history
     for _, s in ipairs(servers) do
         if s.jobId ~= currentJob and not isInHistory(s.jobId) then
-            print("[hop] Picked server (may be re-scan): " .. s.jobId:sub(1, 8))
+            print("[hop] Picked (may re-scan): " .. s.jobId:sub(1, 8))
             return s.jobId
         end
     end
     -- All in history — reset and try again
-    warn("[hop] All " .. #servers .. " servers in history, resetting")
+    warn("[hop] All " .. #servers .. " in history, resetting")
     hopHistory = {}
     saveHopHistory()
     for _, s in ipairs(servers) do
         if s.jobId ~= currentJob then return s.jobId end
     end
     return nil
+end
+
+-- Aggressive hop: try multiple servers quickly
+local function doHop(reason)
+    local currentJob = game.JobId
+    for attempt = 1, 5 do
+        Library:Notify({ Title = "Auto Hop", Description = string.format("%s (%d/5)", reason, attempt), Time = 2 })
+        -- Force refresh server list on retry
+        local nextServer = pickNextServer(attempt > 1)
+        if not nextServer then
+            warn("[hop] No server found, attempt " .. attempt)
+            task.wait(3)
+            continue
+        end
+        isTeleporting = true
+        joinServer(nextServer)
+        task.wait(6)
+        if game.JobId ~= currentJob then
+            return true -- teleport succeeded
+        end
+        -- Failed — mark this server as bad and try another
+        isTeleporting = false
+        addToHistory(nextServer)
+        warn("[hop] Teleport failed attempt " .. attempt)
+        task.wait(1)
+    end
+    isTeleporting = false
+    Library:Notify({ Title = "Auto Hop", Description = "All attempts failed", Time = 5 })
+    return false
 end
 
 -- ── SCAN ALL BOOTHS ───────────────────────────────────────────────────────────
@@ -385,31 +422,14 @@ local function startAutoScan()
 
             -- Skip if this server was already scanned
             if isServerScanned(currentJob) then
-                print("[auto] Server " .. currentJob:sub(1, 8) .. " already scanned, skipping")
+                print("[auto] Server " .. currentJob:sub(1, 8) .. " already scanned")
                 if autoHopEnabled then
-                    -- Try to hop to next server
-                    local nextServer = pickNextServer()
-                    if nextServer then
-                        isTeleporting = true
-                        Library:Notify({ Title = "Auto Hop", Description = "Already scanned, hopping...", Time = 3 })
-                        task.wait(1)
-                        joinServer(nextServer)
-                        -- Wait for teleport to complete or fail
-                        task.wait(5)
-                        -- If still here, teleport failed
-                        if game.JobId == currentJob then
-                            isTeleporting = false
-                            warn("[hop] Teleport failed, waiting before retry")
-                            Library:Notify({ Title = "Auto Hop", Description = "Teleport failed, retry in 5", Time = 5 })
-                            task.wait(5)
-                        end
-                    else
-                        Library:Notify({ Title = "Auto Hop", Description = "No servers available, retry in 5", Time = 5 })
-                        task.wait(5)
+                    doHop("Already scanned")
+                    if game.JobId == currentJob then
+                        task.wait(10) -- all hops failed, cooldown
                     end
                 else
-                    -- No auto hop, just wait
-                    task.wait(10)
+                    task.wait(5)
                 end
                 continue
             end
@@ -418,11 +438,11 @@ local function startAutoScan()
             if next(values) then
                 scanAllBooths(values)
             else
-                Library:Notify({ Title = "Auto Scan", Description = "Failed to load values, retry in 10s", Time = 5 })
-                task.wait(10)
+                Library:Notify({ Title = "Auto Scan", Description = "Failed to load values, retry in 5s", Time = 3 })
+                task.wait(5)
             end
             if autoScanEnabled and not autoHopEnabled then
-                task.wait(3)
+                task.wait(2)
             end
         end
     end)
@@ -569,34 +589,8 @@ scanAllBooths = function(values)
     })
 
     if autoHopEnabled then
-        task.wait(1)
-        -- Retry hop up to 5 times if teleport fails
-        for hopAttempt = 1, 5 do
-            Library:Notify({ Title = "Auto Hop", Description = string.format("Finding server... (attempt %d/5)", hopAttempt), Time = 3 })
-            local nextServer = pickNextServer()
-            if not nextServer then
-                Library:Notify({ Title = "Auto Hop", Description = "No servers, retry in 10s", Time = 5 })
-                task.wait(10)
-                continue
-            end
-            isTeleporting = true
-            task.wait(1)
-            joinServer(nextServer)
-            task.wait(8)
-            if game.JobId ~= currentJobId then
-                -- Teleport succeeded
-                break
-            end
-            -- Still here = teleport failed, try another server
-            isTeleporting = false
-            warn("[hop] Teleport failed attempt " .. hopAttempt .. ", trying another server")
-            addToHistory(nextServer) -- skip this broken server
-            task.wait(3)
-        end
-        if game.JobId == currentJobId then
-            isTeleporting = false
-            Library:Notify({ Title = "Auto Hop", Description = "All hop attempts failed, retry in 30s", Time = 5 })
-        end
+        task.wait(0.5)
+        doHop("Scan done, hopping")
     end
 end
 
@@ -710,14 +704,10 @@ ServerGroup:AddDivider()
 ServerGroup:AddButton({
     Text = "Hop to Random Server",
     Func = function()
-        local nextJob = pickNextServer()
-        if nextJob then
-            Library:Notify({ Title = "Hopping...", Description = nextJob, Time = 3 })
-            task.wait(1)
-            joinServer(nextJob)
-        else
-            Library:Notify({ Title = "Error", Description = "No servers available", Time = 4 })
-        end
+        Library:Notify({ Title = "Hopping...", Description = "Finding server...", Time = 3 })
+        task.spawn(function()
+            doHop("Manual hop")
+        end)
     end,
     Tooltip = string.format("Skip last %d servers", HOP_SKIP_COUNT),
 })
