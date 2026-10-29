@@ -8,7 +8,7 @@ local HttpService     = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 
 -- ── CONFIG ────────────────────────────────────────────────────────────────────
-local ROOT_PLACE_ID = 13866929223 -- Blade Ball plaza (root place)
+local ROOT_PLACE_ID = 16581637217 -- Blade Ball plaza (root place)
 local PLACE_ID      = ROOT_PLACE_ID -- always use root for server list & teleport
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1510395545141907478/cN3zzPCevXKBL4nEBefV7Z6m_ufHSUYjlBHKyPK8sZGl2VufTkamnNpxL58DWvF5z7hs"
 local VALUES_URL  = "http://hyper.ypnode.my.id:10750/values.json" -- server-hosted, no ngrok
