@@ -261,65 +261,19 @@ end
 
 -- ── SERVER HOP ────────────────────────────────────────────────────────────────
 
-local cachedServerList = {}
-local cachedServerTime = 0
-local CACHE_TTL = 15 -- cache server list for 15 seconds
-
-local function fetchServerPage(url)
-    for attempt = 1, 2 do
-        local body = httpGet(url)
-        if body and (body:sub(1, 1) == "{" or body:sub(1, 1) == "[") then
-            local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
-            if ok and data and data.data then return data end
-        end
-        warn("[hop] Page fetch attempt " .. attempt .. " failed, retrying in " .. attempt .. "s")
-        task.wait(attempt)
+local function getServerList()
+    local url = string.format(
+        "https://games.roblox.com/v1/games/%d/servers/Public?limit=100", PLACE_ID
+    )
+    local body = httpGet(url)
+    if not body then return {} end
+    local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+    if not ok or not data or not data.data then return {} end
+    local servers = {}
+    for _, s in ipairs(data.data) do
+        table.insert(servers, { jobId = s.id, players = s.playing, maxPlayers = s.maxPlayers })
     end
-    return nil
-end
-
-local function getServerList(forceRefresh)
-    -- Return cached if fresh enough
-    if not forceRefresh and #cachedServerList > 0 and (os.time() - cachedServerTime) < CACHE_TTL then
-        return cachedServerList
-    end
-    for fullAttempt = 1, 2 do
-        local servers = {}
-        local cursor = ""
-        local maxPages = 3 -- 300 servers is enough, faster
-        local failed = false
-        for page = 1, maxPages do
-            local url = string.format(
-                "https://games.roblox.com/v1/games/%s/servers/Public?limit=100%s",
-                tostring(PLACE_ID),
-                cursor ~= "" and ("&cursor=" .. cursor) or ""
-            )
-            local data = fetchServerPage(url)
-            if not data then
-                warn("[hop] Failed page " .. page .. " attempt " .. fullAttempt)
-                failed = true
-                break
-            end
-            for _, s in ipairs(data.data) do
-                if s.playing and s.maxPlayers and s.id and s.playing < s.maxPlayers then
-                    table.insert(servers, { jobId = s.id, players = s.playing, maxPlayers = s.maxPlayers })
-                end
-            end
-            if not data.nextPageCursor or data.nextPageCursor == "" then break end
-            cursor = data.nextPageCursor
-            task.wait(0.3)
-        end
-        if not failed and #servers > 0 then
-            print("[hop] Fetched " .. #servers .. " servers")
-            cachedServerList = servers
-            cachedServerTime = os.time()
-            return servers
-        end
-        warn("[hop] Attempt " .. fullAttempt .. " got 0 servers, retrying in 3s")
-        task.wait(3)
-    end
-    warn("[hop] All attempts failed")
-    return {}
+    return servers
 end
 
 local function joinServer(jobId)
@@ -327,31 +281,29 @@ local function joinServer(jobId)
     TeleportService:TeleportToPlaceInstance(PLACE_ID, jobId, LocalPlayer)
 end
 
-local function pickNextServer(forceRefresh)
-    local servers = getServerList(forceRefresh)
-    if #servers == 0 then
-        warn("[hop] getServerList returned 0 servers")
-        return nil
+local function pickNextServer()
+    local servers = getServerList()
+    if #servers == 0 then return nil end
+    -- shuffle
+    for i = #servers, 2, -1 do
+        local j = math.random(i)
+        servers[i], servers[j] = servers[j], servers[i]
     end
-    -- sort by most players first (more booths)
-    table.sort(servers, function(a, b) return a.players > b.players end)
     local currentJob = game.JobId
     -- First pass: skip current, history, and already-scanned servers
     for _, s in ipairs(servers) do
         if s.jobId ~= currentJob and not isInHistory(s.jobId) and not isServerScanned(s.jobId) then
-            print("[hop] Picked unscanned: " .. s.jobId:sub(1, 8) .. " (" .. s.players .. "p)")
             return s.jobId
         end
     end
     -- Second pass: allow already-scanned but not in history
     for _, s in ipairs(servers) do
         if s.jobId ~= currentJob and not isInHistory(s.jobId) then
-            print("[hop] Picked (may re-scan): " .. s.jobId:sub(1, 8))
             return s.jobId
         end
     end
-    -- All in history — reset and try again
-    warn("[hop] All " .. #servers .. " in history, resetting")
+    -- All in history — reset
+    warn("[hop] All servers in history, resetting")
     hopHistory = {}
     saveHopHistory()
     for _, s in ipairs(servers) do
@@ -365,8 +317,7 @@ local function doHop(reason)
     local currentJob = game.JobId
     for attempt = 1, 5 do
         Library:Notify({ Title = "Auto Hop", Description = string.format("%s (%d/5)", reason, attempt), Time = 2 })
-        -- Force refresh server list on retry
-        local nextServer = pickNextServer(attempt > 1)
+        local nextServer = pickNextServer()
         if not nextServer then
             warn("[hop] No server found, attempt " .. attempt)
             task.wait(3)
