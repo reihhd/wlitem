@@ -177,53 +177,173 @@ end
 -- Response: array of { id, n(name), c(category), p(price/value), r(rarity),
 --                       st(status), tg(tag), ch(change24h), a(avgPrice), f(finisher) }
 
-local function loadBBValues()
-    print("[bbvalues] Fetching from bbvalues.uk/api/items...")
-    local body = httpGet("https://bbvalues.uk/api/items", {
-        ["x-bbv-handshake"] = "v1-secure-request",
-        ["Referer"] = "https://bbvalues.uk/values/",
-    })
-    if not body then
-        warn("[bbvalues] httpGet returned nil")
-        return {}
-    end
-    if body:sub(1, 1) ~= "[" then
-        warn("[bbvalues] Response is not JSON array: " .. body:sub(1, 100))
-        return {}
-    end
-    local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
-    if not ok or type(data) ~= "table" then
-        warn("[bbvalues] JSONDecode failed")
-        return {}
-    end
+local BBVALUES_CACHE_FILE = "bbvalues_cache.json"
+local cachedBBValues = nil      -- in-memory cache
+local lastFetchTime  = 0        -- os.time() of last successful fetch
+local CACHE_TTL      = 300      -- 5 menit — pakai cache kalau masih fresh
 
-    -- Build lookup: lowercase name -> { value, category, rarity, status, tag, finisher }
+local function parseBBValuesBody(body)
+    if not body or body == "" then return nil end
+    if body:sub(1, 1) ~= "[" then return nil end
+    local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+    if not ok or type(data) ~= "table" then return nil end
+    return data
+end
+
+local function buildValuesLookup(data)
     local values = {}
     local count = 0
     local filtered = 0
+    local dupeCount = 0
     for _, item in ipairs(data) do
         local name = item.n
-        local value = item.p -- "p" = price/value
+        local value = item.p
         if name and value then
             if value > MIN_VALUE then
-                values[string.lower(name)] = {
+                local key = string.lower(name)
+                local entry = {
                     value    = value,
                     category = item.c or "unknown",
                     rarity   = item.r or "NORMAL",
                     status   = item.st or "stable",
                     tag      = item.tg or "",
-                    finisher = item.f == true,
+                    finisher = (item.s == "Finisher") or (item.f == true),
                     avg      = item.a or 0,
                     change   = item.ch or 0,
+                    itemId   = item.id or "",
                 }
+                if not values[key] then
+                    values[key] = { entry }
+                else
+                    table.insert(values[key], entry)
+                    dupeCount += 1
+                end
                 count += 1
             else
                 filtered += 1
             end
         end
     end
-    print(string.format("[bbvalues] Loaded %d items (filtered %d with value <= %d)", count, filtered, MIN_VALUE))
-    return values
+    print(string.format("[bbvalues] Built lookup: %d items (%d dupes, filtered %d with value <= %d)", count, dupeCount, filtered, MIN_VALUE))
+    return values, count
+end
+
+local function saveBBValuesCache(body)
+    if writefile then
+        pcall(writefile, BBVALUES_CACHE_FILE, body)
+        print("[bbvalues] Cache saved to file")
+    end
+end
+
+local function loadBBValuesFromFile()
+    if not readfile then return nil end
+    local ok, content = pcall(readfile, BBVALUES_CACHE_FILE)
+    if not ok or not content or content == "" then return nil end
+    local data = parseBBValuesBody(content)
+    if data and #data > 100 then
+        print("[bbvalues] Loaded " .. #data .. " items from file cache")
+        return data
+    end
+    return nil
+end
+
+local function fetchBBValuesRaw()
+    return httpGet("https://bbvalues.uk/api/items", {
+        ["x-bbv-handshake"] = "v1-secure-request",
+        ["Referer"] = "https://bbvalues.uk/values/",
+    })
+end
+
+local function loadBBValues()
+    -- 1. Kalau in-memory cache masih fresh, pakai itu
+    if cachedBBValues and (os.time() - lastFetchTime) < CACHE_TTL then
+        print("[bbvalues] Using in-memory cache (" .. (os.time() - lastFetchTime) .. "s old)")
+        return cachedBBValues
+    end
+
+    -- 2. Coba fetch dari API (dengan retry)
+    local MAX_RETRIES = 3
+    local body = nil
+    for attempt = 1, MAX_RETRIES do
+        print(string.format("[bbvalues] Fetch attempt %d/%d...", attempt, MAX_RETRIES))
+        body = fetchBBValuesRaw()
+        local data = parseBBValuesBody(body)
+        if data and #data > 100 then
+            -- Berhasil! Simpan cache
+            print("[bbvalues] API fetch OK: " .. #data .. " items")
+            saveBBValuesCache(body)
+            local values, count = buildValuesLookup(data)
+            if count > 0 then
+                cachedBBValues = values
+                lastFetchTime = os.time()
+                return values
+            end
+        end
+        -- Gagal — log error
+        if body then
+            local preview = body:sub(1, 80):gsub("%s+", " ")
+            warn(string.format("[bbvalues] Attempt %d failed: %s", attempt, preview))
+        else
+            warn(string.format("[bbvalues] Attempt %d failed: nil response", attempt))
+        end
+        if attempt < MAX_RETRIES then
+            local delay = attempt * 3 -- 3s, 6s
+            print("[bbvalues] Retrying in " .. delay .. "s...")
+            task.wait(delay)
+        end
+    end
+
+    -- 3. API gagal semua — coba in-memory cache (meski expired)
+    if cachedBBValues then
+        local age = os.time() - lastFetchTime
+        warn(string.format("[bbvalues] API failed, using expired in-memory cache (%ds old)", age))
+        Library:Notify({ Title = "BBValues", Description = string.format("API down, using cache (%dm old)", math.floor(age / 60)), Time = 5 })
+        return cachedBBValues
+    end
+
+    -- 4. Tidak ada in-memory cache — coba file cache
+    local fileData = loadBBValuesFromFile()
+    if fileData then
+        local values, count = buildValuesLookup(fileData)
+        if count > 0 then
+            cachedBBValues = values
+            lastFetchTime = os.time() - CACHE_TTL + 60 -- mark as "almost expired" so next call retries
+            warn("[bbvalues] API failed, using file cache")
+            Library:Notify({ Title = "BBValues", Description = "API down, using saved cache", Time = 5 })
+            return values
+        end
+    end
+
+    -- 5. Benar-benar gagal
+    warn("[bbvalues] All attempts failed, no cache available")
+    return {}
+end
+
+-- Pilih variant terbaik dari array values berdasarkan finisher status booth
+-- Strategi:
+--   1. Kalau booth item punya finisher → cari variant finisher dulu
+--   2. Kalau booth item TIDAK punya finisher → cari variant non-finisher
+--   3. Kalau tidak ketemu match → pakai variant dengan VALUE TERTINGGI (aman, anti false positive)
+local function pickBestVariant(variants, hasFinisher)
+    if #variants == 1 then return variants[1] end
+
+    -- Cari yang cocok finisher status
+    local matched = {}
+    for _, v in ipairs(variants) do
+        if v.finisher == hasFinisher then
+            table.insert(matched, v)
+        end
+    end
+
+    -- Kalau ada match finisher, pakai yang value tertinggi dari match
+    local pool = #matched > 0 and matched or variants
+    local best = pool[1]
+    for i = 2, #pool do
+        if pool[i].value > best.value then
+            best = pool[i]
+        end
+    end
+    return best
 end
 
 -- ── BOOTH SCAN ────────────────────────────────────────────────────────────────
@@ -464,22 +584,26 @@ scanAllBooths = function(values)
 
         for _, item in ipairs(items) do
             local key       = string.lower(item.name)
-            local valueData = values[key]
-            if not valueData then continue end
+            local variants  = values[key]
+            if not variants then continue end
 
+            -- Pilih variant terbaik berdasarkan finisher status di booth
+            local valueData = pickBestVariant(variants, item.finisher)
             local realValue = valueData.value
             local category  = valueData.category
             local rarity    = valueData.rarity
             local sellPrice = parseNumber(item.price)
+            local variantCount = #variants
 
             -- Underrap: selling below (value - DEFAULT_UNDER)
             local threshold = realValue - DEFAULT_UNDER
             local isUnderrap = sellPrice ~= nil and sellPrice <= threshold
 
             table.insert(results, string.format(
-                "%s | Price: %s | Value: %s | Cat: %s | Rarity: %s%s%s",
+                "%s | Price: %s | Value: %s | Cat: %s | Rarity: %s%s%s%s",
                 item.name, item.price, tostring(realValue), category, rarity,
                 item.finisher and " | FINISHER" or "",
+                variantCount > 1 and string.format(" | %d variants", variantCount) or "",
                 isUnderrap and " | <UNDERRAP>" or ""
             ))
 
@@ -487,10 +611,22 @@ scanAllBooths = function(values)
                 underrapCount += 1
                 local profit = realValue - sellPrice
                 local pctOff = math.floor((1 - sellPrice / realValue) * 100)
+                local variantNote = ""
+                if variantCount > 1 then
+                    local cats = {}
+                    for _, v in ipairs(variants) do
+                        local label = v.category .. (v.finisher and " ✨" or "")
+                        if not table.find(cats, label) then table.insert(cats, label) end
+                    end
+                    variantNote = string.format("\n⚠️ %d variants exist: %s\nMatched: **%s%s** (value %s)",
+                        variantCount, table.concat(cats, ", "),
+                        category, valueData.finisher and " Finisher" or "",
+                        tostring(realValue))
+                end
                 sendWebhook({
                     embeds = {{
                         title = "🎯 UNDERRAP FOUND (BBValues)",
-                        description = string.format("**%s** selling **%d%%** below value!", item.name, pctOff),
+                        description = string.format("**%s** selling **%d%%** below value!%s", item.name, pctOff, variantNote),
                         color = 0x00FF88,
                         fields = {
                             { name = "📦 Item",       value = item.name,                                    inline = true },
@@ -498,7 +634,7 @@ scanAllBooths = function(values)
                             { name = "💎 Value",      value = string.format("`%s`", tostring(realValue)),   inline = true },
                             { name = "🏷️ Rarity",    value = rarity,                                       inline = true },
                             { name = "📈 Profit",     value = string.format("`+%s`", tostring(profit)),     inline = true },
-                            { name = "🏷️ Category",  value = category,                                     inline = true },
+                            { name = "🏷️ Category",  value = category .. (variantCount > 1 and string.format(" (%d variants)", variantCount) or ""), inline = true },
                             { name = "⚔️ Finisher",  value = item.finisher and "✨ Yes" or "No",           inline = true },
                             { name = "📊 Status",     value = valueData.status,                             inline = true },
                             { name = "👤 Seller",    value = string.format("[%s](https://www.roblox.com/users/%s/profile)", username, tostring(ownerId)), inline = true },
