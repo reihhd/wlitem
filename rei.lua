@@ -518,7 +518,10 @@ local function loadManualValues()
         if not v.disabled or v.disabled == 0 then
             local val = v.value
             if val and val > MIN_VALUE then
-                local key = string.lower(k)
+                -- Keys from /values.json may be "Name" or "Name|fin"
+                local rawName = v.name or k:gsub("|fin$", "")
+                local fin = v.finisher == true or v.finisher == 1
+                local key = string.lower(rawName)
                 local underThreshold = v.under or 0
                 if underThreshold == 0 then underThreshold = val - DEFAULT_UNDER end
                 local entry = {
@@ -526,7 +529,7 @@ local function loadManualValues()
                     category = v.category or "sword",
                     rarity   = "MANUAL",
                     status   = "manual",
-                    finisher = v.finisher == true or v.finisher == 1,
+                    finisher = fin,
                     source   = "manual",
                     avg      = 0,
                     change   = 0,
@@ -821,7 +824,15 @@ scanAllBooths = function(values, source)
             if source == "manual" then
                 -- Manual mode: pakai under threshold dari bot
                 if not sellPrice then continue end
-                valueData = variants[1] -- manual biasanya 1 variant per item
+                -- Find the variant matching the booth's finisher status
+                valueData = nil
+                for _, v in ipairs(variants) do
+                    if v.finisher == (item.finisher and true or false) then
+                        valueData = v
+                        break
+                    end
+                end
+                if not valueData then valueData = variants[1] end -- fallback
                 local threshold = valueData.underThreshold or (valueData.value - DEFAULT_UNDER)
                 isUnderrap = sellPrice <= threshold
             else
@@ -975,6 +986,52 @@ MainGroup:AddDropdown("ScanMode", {
         end
         Library:Notify({ Title = "Scan Mode", Description = "Mode: " .. val, Time = 3 })
     end,
+})
+
+MainGroup:AddDivider()
+
+MainGroup:AddButton({
+    Text = "🔄 Refresh Values",
+    Func = function()
+        task.spawn(function()
+            Library:Notify({ Title = "Refresh", Description = "Fetching values...", Time = 2 })
+
+            local bbCount = 0
+            local manualCount = 0
+
+            -- Force refresh BBValues (clear cache)
+            cachedBBValues = nil
+            lastFetchTime = 0
+            local bbVals = loadBBValues()
+            if bbVals and next(bbVals) then
+                for _, variants in pairs(bbVals) do
+                    bbCount += #variants
+                end
+            end
+
+            -- Force refresh Manual values
+            local manVals = loadManualValues()
+            if manVals and next(manVals) then
+                for _, variants in pairs(manVals) do
+                    manualCount += #variants
+                end
+            end
+
+            -- Also clear scanned servers so current server can be re-scanned with new values
+            local currentJob = game.JobId
+            if scannedServers[currentJob] then
+                scannedServers[currentJob] = nil
+                saveScannedServers()
+            end
+
+            Library:Notify({
+                Title = "Refresh Complete",
+                Description = string.format("BBValues: %d | Manual: %d", bbCount, manualCount),
+                Time = 5,
+            })
+        end)
+    end,
+    Tooltip = "Force fetch ulang BBValues + Manual values (clear cache)",
 })
 
 MainGroup:AddDivider()
