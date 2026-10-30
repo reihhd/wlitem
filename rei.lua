@@ -1,5 +1,5 @@
 -- main_bbvalues.luau
--- Blade Ball Booth Scanner — Values langsung dari bbvalues.uk
+-- Blade Ball Booth Scanner — Dual Source: Manual (Bot) + Auto (BBValues)
 -- Hanya scan item dengan value > 100
 -- Made by Rei
 
@@ -13,6 +13,7 @@ local ROOT_PLACE_ID = 16581637217
 local PLACE_ID      = ROOT_PLACE_ID
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1510395545141907478/cN3zzPCevXKBL4nEBefV7Z6m_ufHSUYjlBHKyPK8sZGl2VufTkamnNpxL58DWvF5z7hs"
 local SCANS_URL   = "http://hyper.ypnode.my.id:10750/scans"
+local VALUES_URL  = "http://hyper.ypnode.my.id:10750/values.json" -- manual values dari bot
 local MIN_VALUE      = 100 -- hanya scan item dengan value > ini
 local DEFAULT_UNDER  = 20  -- default under deduction
 local HOP_SKIP_COUNT = 20
@@ -433,6 +434,63 @@ local function analyzeItem(variants, hasFinisher, sellPrice)
     return cheapest, isUnderrap
 end
 
+-- ── MANUAL VALUES (dari Bot) ──────────────────────────────────────────────────
+-- Format: { items: { "ItemName": { value, category, finisher, under, disabled } } }
+
+local function loadManualValues()
+    print("[manual] Fetching: " .. VALUES_URL)
+    local body = httpGet(VALUES_URL, {})
+    if not body then
+        warn("[manual] httpGet returned nil")
+        return {}
+    end
+    if body:sub(1, 1) ~= "{" then
+        warn("[manual] Response is not JSON: " .. body:sub(1, 80))
+        return {}
+    end
+    local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+    if not ok then
+        warn("[manual] JSONDecode failed: " .. tostring(data))
+        return {}
+    end
+    if not data or not data.items then
+        warn("[manual] No 'items' field")
+        return {}
+    end
+    local values = {}
+    local count = 0
+    for k, v in pairs(data.items) do
+        if not v.disabled or v.disabled == 0 then
+            local val = v.value
+            if val and val > MIN_VALUE then
+                local key = string.lower(k)
+                local underThreshold = v.under or 0
+                if underThreshold == 0 then underThreshold = val - DEFAULT_UNDER end
+                local entry = {
+                    value    = val,
+                    category = v.category or "sword",
+                    rarity   = "MANUAL",
+                    status   = "manual",
+                    finisher = v.finisher == true or v.finisher == 1,
+                    source   = "manual",
+                    avg      = 0,
+                    change   = 0,
+                    itemId   = "",
+                    underThreshold = underThreshold, -- custom under dari bot
+                }
+                if not values[key] then
+                    values[key] = { entry }
+                else
+                    table.insert(values[key], entry)
+                end
+                count += 1
+            end
+        end
+    end
+    print(string.format("[manual] Loaded %d items from bot", count))
+    return values, count
+end
+
 -- ── BOOTH SCAN ────────────────────────────────────────────────────────────────
 
 local function firePrompt(prompt)
@@ -567,6 +625,10 @@ end
 local autoHopEnabled  = false
 local autoScanEnabled = false
 local autoScanThread  = nil
+local scanMode        = "auto" -- "auto" (bbvalues), "manual" (bot), "both"
+
+-- Last joined underrap info (untuk ditampilkan di GUI)
+local lastUnderrapInfo = nil -- { item, price, realValue, seller, category, finisher, jobId }
 
 local function stopAutoScan()
     if autoScanThread then
@@ -603,13 +665,35 @@ local function startAutoScan()
                 continue
             end
 
-            local values = loadBBValues()
-            if next(values) then
-                scanAllBooths(values)
-            else
-                Library:Notify({ Title = "Auto Scan", Description = "Failed to load bbvalues, retry in 5s", Time = 3 })
+            -- Scan berdasarkan mode
+            local didScan = false
+
+            if scanMode == "auto" or scanMode == "both" then
+                local values = loadBBValues()
+                if next(values) then
+                    scanAllBooths(values, "auto")
+                    didScan = true
+                else
+                    Library:Notify({ Title = "Auto Scan", Description = "Failed to load bbvalues", Time = 3 })
+                end
+            end
+
+            if scanMode == "manual" or scanMode == "both" then
+                local values = loadManualValues()
+                if next(values) then
+                    scanAllBooths(values, "manual")
+                    didScan = true
+                else
+                    if scanMode == "manual" then
+                        Library:Notify({ Title = "Auto Scan", Description = "Failed to load manual values", Time = 3 })
+                    end
+                end
+            end
+
+            if not didScan then
                 task.wait(5)
             end
+
             if autoScanEnabled and not autoHopEnabled then
                 task.wait(2)
             end
@@ -617,8 +701,8 @@ local function startAutoScan()
     end)
 end
 
-scanAllBooths = function(values)
-    if isTeleporting then
+scanAllBooths = function(values, source)
+    source = source or "auto"    if isTeleporting then
         print("[scanner] Skipping scan — teleporting")
         return
     end
@@ -677,7 +761,18 @@ scanAllBooths = function(values)
             -- Analisis smart: cek apakah harga jual cocok dengan variant manapun
             local sellPrice = parseNumber(item.price)
             local variantCount = #variants
-            local valueData, isUnderrap = analyzeItem(variants, item.finisher, sellPrice)
+            local valueData, isUnderrap
+
+            if source == "manual" then
+                -- Manual mode: pakai under threshold dari bot
+                if not sellPrice then continue end
+                valueData = variants[1] -- manual biasanya 1 variant per item
+                local threshold = valueData.underThreshold or (valueData.value - DEFAULT_UNDER)
+                isUnderrap = sellPrice <= threshold
+            else
+                -- Auto mode: pakai smart variant matching
+                valueData, isUnderrap = analyzeItem(variants, item.finisher, sellPrice)
+            end
             if not valueData then continue end -- tidak bisa parse harga
             local realValue = valueData.value
             local category  = valueData.category
@@ -695,6 +790,7 @@ scanAllBooths = function(values)
                 underrapCount += 1
                 local profit = realValue - sellPrice
                 local pctOff = math.floor((1 - sellPrice / realValue) * 100)
+                local sourceLabel = source == "manual" and "Manual" or "BBValues"
                 local variantNote = ""
                 if variantCount > 1 then
                     local cats = {}
@@ -709,7 +805,7 @@ scanAllBooths = function(values)
                 end
                 sendWebhook({
                     embeds = {{
-                        title = "🎯 UNDERRAP FOUND (BBValues)",
+                        title = "🎯 UNDERRAP FOUND (" .. sourceLabel .. ")",
                         description = string.format("**%s** selling **%d%%** below value!%s", item.name, pctOff, variantNote),
                         color = 0x00FF88,
                         fields = {
@@ -732,10 +828,30 @@ scanAllBooths = function(values)
                             ), inline = false },
                             { name = "🆔 Job ID", value = string.format("`%s`", currentJobId), inline = false },
                         },
-                        footer = { text = "BBValues Scanner · " .. currentJobId },
+                        footer = { text = sourceLabel .. " Scanner · " .. currentJobId },
                         timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
                     }},
                 })
+                -- Simpan info underrap terakhir untuk ditampilkan di GUI
+                lastUnderrapInfo = {
+                    item      = item.name,
+                    price     = tostring(item.price),
+                    realValue = tostring(realValue),
+                    seller    = username,
+                    category  = category,
+                    finisher  = item.finisher,
+                    profit    = tostring(profit),
+                    jobId     = currentJobId,
+                }
+                -- Update GUI labels
+                if lastJoinedLabels then
+                    lastJoinedLabels.item:SetText("📦 Item: " .. item.name .. (item.finisher and " ✨" or ""))
+                    lastJoinedLabels.seller:SetText("👤 Seller: " .. username)
+                    lastJoinedLabels.price:SetText("💰 Price: " .. tostring(item.price))
+                    lastJoinedLabels.value:SetText("💎 Value: " .. tostring(realValue))
+                    lastJoinedLabels.profit:SetText("📈 Profit: +" .. tostring(profit))
+                end
+
                 postScanToAPI({
                     item_name  = item.name,
                     price      = sellPrice or 0,
@@ -747,6 +863,7 @@ scanAllBooths = function(values)
                     profit     = profit,
                     job_id     = currentJobId,
                     place_id   = PLACE_ID,
+                    source     = source, -- "manual" or "auto"
                 })
                 task.wait(0.1)
             end
@@ -782,22 +899,60 @@ local Tabs = {
 }
 
 -- ── SCANNER TAB ──
-local MainGroup = Tabs.Main:AddGroupbox({ Side = "Left", Name = "Scanner (BBValues)" })
+local MainGroup = Tabs.Main:AddGroupbox({ Side = "Left", Name = "Scanner" })
 
-MainGroup:AddLabel("Values dari bbvalues.uk (min > " .. MIN_VALUE .. ")")
+MainGroup:AddLabel("Dual Source: Manual (Bot) + Auto (BBValues)")
+MainGroup:AddDivider()
+
+MainGroup:AddDropdown("ScanMode", {
+    Values  = { "Auto (BBValues)", "Manual (Bot)", "Both" },
+    Default = 1,
+    Multi   = false,
+    Text    = "Scan Mode",
+    Tooltip = "Auto = bbvalues.uk, Manual = harga dari bot /add, Both = keduanya",
+    Callback = function(val)
+        if val == "Auto (BBValues)" then
+            scanMode = "auto"
+        elseif val == "Manual (Bot)" then
+            scanMode = "manual"
+        else
+            scanMode = "both"
+        end
+        Library:Notify({ Title = "Scan Mode", Description = "Mode: " .. val, Time = 3 })
+    end,
+})
+
 MainGroup:AddDivider()
 
 MainGroup:AddButton({
     Text = "Scan All Booths",
     Func = function()
-        local values = loadBBValues()
-        if not next(values) then
-            Library:Notify({ Title = "Error", Description = "Failed to load bbvalues", Time = 5 })
-            return
-        end
-        task.spawn(scanAllBooths, values)
+        task.spawn(function()
+            local didScan = false
+            if scanMode == "auto" or scanMode == "both" then
+                local values = loadBBValues()
+                if next(values) then
+                    scanAllBooths(values, "auto")
+                    didScan = true
+                else
+                    Library:Notify({ Title = "Error", Description = "Failed to load bbvalues", Time = 5 })
+                end
+            end
+            if scanMode == "manual" or scanMode == "both" then
+                local values = loadManualValues()
+                if next(values) then
+                    scanAllBooths(values, "manual")
+                    didScan = true
+                else
+                    Library:Notify({ Title = "Error", Description = "Failed to load manual values", Time = 5 })
+                end
+            end
+            if not didScan then
+                Library:Notify({ Title = "Error", Description = "No values loaded", Time = 5 })
+            end
+        end)
     end,
-    Tooltip = "Scan all booths using bbvalues.uk prices",
+    Tooltip = "Scan booths sesuai mode yang dipilih",
 })
 
 MainGroup:AddDivider()
@@ -833,6 +988,43 @@ MainGroup:AddToggle("AutoHop", {
 })
 
 MainGroup:AddDivider()
+
+-- ── LAST UNDERRAP INFO ──
+local LastJoinedGroup = Tabs.Main:AddGroupbox({ Side = "Right", Name = "Last Underrap Found" })
+
+local lastJoinedLabels = {
+    item   = LastJoinedGroup:AddLabel("📦 Item: -"),
+    seller = LastJoinedGroup:AddLabel("👤 Seller: -"),
+    price  = LastJoinedGroup:AddLabel("💰 Price: -"),
+    value  = LastJoinedGroup:AddLabel("💎 Value: -"),
+    profit = LastJoinedGroup:AddLabel("📈 Profit: -"),
+}
+
+LastJoinedGroup:AddDivider()
+
+LastJoinedGroup:AddButton({
+    Text = "Join Last Underrap Server",
+    Func = function()
+        if not lastUnderrapInfo then
+            Library:Notify({ Title = "Error", Description = "No underrap found yet", Time = 3 })
+            return
+        end
+        local jobId = lastUnderrapInfo.jobId
+        if jobId == game.JobId then
+            Library:Notify({ Title = "Info", Description = "Already in this server", Time = 3 })
+            return
+        end
+        Library:Notify({
+            Title = "Joining...",
+            Description = string.format("%s by %s", lastUnderrapInfo.item, lastUnderrapInfo.seller),
+            Time = 3,
+        })
+        task.spawn(function()
+            joinServer(jobId)
+        end)
+    end,
+    Tooltip = "Teleport ke server underrap terakhir",
+})
 
 -- ── SERVERS TAB ──
 local ServerGroup = Tabs.Server:AddGroupbox({ Side = "Left", Name = "Server List" })
