@@ -379,28 +379,81 @@ local function analyzeItem(variants, hasFinisher, sellPrice)
     end
 
     -- Step 3: Multiple variant di pool (beda category: Sword/Emote/Explosion)
-    -- Cari variant yang value-nya paling DEKAT dengan harga jual
-    -- Ini menghindari false positive: dijual 300, Sword=2500, Emote=300 → match Emote
+    -- 
+    -- CATEGORY EXCEPTION RULES:
+    --   Banyak item punya nama sama tapi beda category & harga:
+    --     "Crimson Kagune" → Sword 2500, Emote 300
+    --     "Frog"           → Sword 1000, Finisher 2500000
+    --     "Galaxy"         → Sword 5000, Explosion 3000
+    --   
+    --   Strategi: 
+    --   A) Kalau harga jual DEKAT dengan salah satu variant → match variant itu
+    --   B) Kalau harga jual JAUH dari semua → cek apakah di bawah variant TERMURAH
+    --   C) Explicit category grouping: group by source type (s field)
+    --      untuk memastikan Sword vs Emote vs Explosion vs Finisher tidak tercampur
+
+    -- Group variants by category for better analysis
+    local categoryGroups = {}
+    for _, v in ipairs(pool) do
+        local cat = v.category or "unknown"
+        if not categoryGroups[cat] then
+            categoryGroups[cat] = {}
+        end
+        table.insert(categoryGroups[cat], v)
+    end
+
+    -- Count distinct categories
+    local catCount = 0
+    for _ in pairs(categoryGroups) do catCount += 1 end
+
+    -- If multiple categories exist, use price-proximity matching
+    -- This handles: Sword 2500 vs Emote 300 — sell at 250 → match Emote
     local closestVariant = nil
     local closestDiff = math.huge
+    local closestRatio = math.huge -- ratio = |sellPrice - value| / value
+
     for _, v in ipairs(pool) do
         local diff = math.abs(v.value - sellPrice)
-        if diff < closestDiff then
-            closestDiff = diff
-            closestVariant = v
+        local ratio = diff / math.max(v.value, 1) -- normalized distance
+        
+        -- Prefer ratio-based matching for multi-category items
+        -- This prevents: sell 1000, Sword=2500 (diff=1500), Emote=300 (diff=700)
+        -- from matching Emote when it's actually a Sword being sold cheap
+        if catCount > 1 then
+            -- Use ratio: closer percentage-wise wins
+            if ratio < closestRatio then
+                closestRatio = ratio
+                closestDiff = diff
+                closestVariant = v
+            end
+        else
+            -- Single category: use absolute diff
+            if diff < closestDiff then
+                closestDiff = diff
+                closestVariant = v
+            end
         end
     end
 
-    -- Cek juga variant di luar pool (beda finisher) untuk safety
+    -- Also check variants outside pool (different finisher status)
     for _, v in ipairs(finisherOther) do
         local diff = math.abs(v.value - sellPrice)
-        if diff < closestDiff then
-            closestDiff = diff
-            closestVariant = v
+        local ratio = diff / math.max(v.value, 1)
+        if catCount > 1 then
+            if ratio < closestRatio then
+                closestRatio = ratio
+                closestDiff = diff
+                closestVariant = v
+            end
+        else
+            if diff < closestDiff then
+                closestDiff = diff
+                closestVariant = v
+            end
         end
     end
 
-    -- Kalau harga jual dekat dengan closest variant → bukan underrap
+    -- Check if sell price is within reasonable range of closest variant
     if closestVariant then
         local low  = closestVariant.value - DEFAULT_UNDER
         local high = closestVariant.value * 1.5
@@ -411,7 +464,6 @@ local function analyzeItem(variants, hasFinisher, sellPrice)
 
     -- Step 4: Harga jual tidak dekat dengan variant manapun
     -- Cek apakah underrap terhadap variant TERMURAH di pool
-    -- (pakai termurah supaya aman — kalau di bawah yang termurah pun, baru underrap)
     local cheapest = pool[1]
     for i = 2, #pool do
         if pool[i].value < cheapest.value then
@@ -423,9 +475,12 @@ local function analyzeItem(variants, hasFinisher, sellPrice)
     local isUnderrap = sellPrice <= threshold
 
     -- Final safety: cek semua variant (termasuk beda finisher)
+    -- Gunakan range yang lebih ketat untuk multi-category
     if isUnderrap then
         for _, v in ipairs(variants) do
-            if sellPrice >= (v.value * 0.5) and sellPrice <= (v.value * 1.5) then
+            local rangeLow = v.value * (catCount > 1 and 0.6 or 0.5)
+            local rangeHigh = v.value * 1.5
+            if sellPrice >= rangeLow and sellPrice <= rangeHigh then
                 return v, false -- harga masuk range wajar variant ini
             end
         end
@@ -622,8 +677,8 @@ end
 
 -- ── SCAN ALL BOOTHS ───────────────────────────────────────────────────────────
 
-local autoHopEnabled  = false
-local autoScanEnabled = false
+local autoHopEnabled  = true
+local autoScanEnabled = true
 local autoScanThread  = nil
 local scanMode        = "auto" -- "auto" (bbvalues), "manual" (bot), "both"
 
@@ -958,7 +1013,7 @@ MainGroup:AddButton({
 MainGroup:AddDivider()
 
 MainGroup:AddToggle("AutoScan", {
-    Default = false,
+    Default = true,
     Text = "Auto Scan",
     Tooltip = "Continuously scan booths",
     Callback = function(val)
@@ -973,7 +1028,7 @@ MainGroup:AddToggle("AutoScan", {
 })
 
 MainGroup:AddToggle("AutoHop", {
-    Default = false,
+    Default = true,
     Text = "Auto Change Server",
     Tooltip = string.format("Hop to next server after scan (skip last %d)", HOP_SKIP_COUNT),
     Callback = function(val)
@@ -1123,7 +1178,7 @@ if game.PlaceId ~= ROOT_PLACE_ID then
     return
 end
 
-Library:Notify({ Title = "BBValues Scanner", Description = string.format("Loaded (min value: %d)", MIN_VALUE), Time = 3 })
+Library:Notify({ Title = "BBValues Scanner", Description = string.format("Loaded (min value: %d) — Auto Scan + Hop ON", MIN_VALUE), Time = 4 })
 
 task.spawn(function()
     task.wait(1)
@@ -1131,7 +1186,7 @@ task.spawn(function()
     autoScanEnabled = Toggles.AutoScan.Value
     print("[init] AutoScan=" .. tostring(autoScanEnabled) .. " AutoHop=" .. tostring(autoHopEnabled))
     if autoScanEnabled then
-        Library:Notify({ Title = "Auto Scan", Description = "Resuming from saved config", Time = 4 })
+        Library:Notify({ Title = "Auto Scan", Description = "Started automatically", Time = 3 })
         startAutoScan()
     end
 end)
