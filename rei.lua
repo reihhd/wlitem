@@ -207,7 +207,8 @@ local function buildValuesLookup(data)
                     rarity   = item.r or "NORMAL",
                     status   = item.st or "stable",
                     tag      = item.tg or "",
-                    finisher = (item.s == "Finisher") or (item.f == true),
+                    finisher = (item.s == "Finisher"), -- HANYA s=="Finisher", f adalah "has finisher variant"
+                    source   = item.s or "None",
                     avg      = item.a or 0,
                     change   = item.ch or 0,
                     itemId   = item.id or "",
@@ -319,31 +320,117 @@ local function loadBBValues()
     return {}
 end
 
--- Pilih variant terbaik dari array values berdasarkan finisher status booth
--- Strategi:
---   1. Kalau booth item punya finisher → cari variant finisher dulu
---   2. Kalau booth item TIDAK punya finisher → cari variant non-finisher
---   3. Kalau tidak ketemu match → pakai variant dengan VALUE TERTINGGI (aman, anti false positive)
-local function pickBestVariant(variants, hasFinisher)
-    if #variants == 1 then return variants[1] end
+-- Analisis smart variant matching
+-- 
+-- Fakta dari bbvalues.uk API:
+--   s = "Finisher"  → item ini ADALAH versi finisher (contoh: Frog Finisher = 2.5M)
+--   s = "None"      → item ini bukan finisher (contoh: Frog biasa = 1M)
+--   f = true/false  → item ini PUNYA variant finisher (bukan berarti item ini finisher!)
+--
+-- Di booth Blade Ball:
+--   Frame.Finisher.Visible = true  → item yang dijual adalah versi finisher
+--   Frame.Finisher.Visible = false → item yang dijual bukan finisher
+--
+-- Strategi matching:
+--   1. Kalau booth punya finisher → cari variant dengan s="Finisher"
+--   2. Kalau booth TIDAK punya finisher → cari variant dengan s!="Finisher"
+--   3. Kalau ada multiple variant non-finisher (beda category: Sword/Emote/Explosion)
+--      → cek harga jual, cocokkan ke variant yang value-nya paling dekat
+--   4. Hanya report underrap kalau harga jual di bawah SEMUA variant yang cocok
 
-    -- Cari yang cocok finisher status
-    local matched = {}
+local function analyzeItem(variants, hasFinisher, sellPrice)
+    if not sellPrice then
+        return nil, false
+    end
+
+    -- Step 1: Filter berdasarkan finisher status booth
+    local finisherMatch = {}   -- variant yang cocok finisher status
+    local finisherOther = {}   -- variant yang beda finisher status
     for _, v in ipairs(variants) do
         if v.finisher == hasFinisher then
-            table.insert(matched, v)
+            table.insert(finisherMatch, v)
+        else
+            table.insert(finisherOther, v)
         end
     end
 
-    -- Kalau ada match finisher, pakai yang value tertinggi dari match
-    local pool = #matched > 0 and matched or variants
-    local best = pool[1]
-    for i = 2, #pool do
-        if pool[i].value > best.value then
-            best = pool[i]
+    -- Pool utama: yang cocok finisher status, fallback ke semua
+    local pool = #finisherMatch > 0 and finisherMatch or variants
+
+    -- Step 2: Kalau cuma 1 variant di pool, langsung cek underrap
+    if #pool == 1 then
+        local v = pool[1]
+        local threshold = v.value - DEFAULT_UNDER
+        local isUnderrap = sellPrice <= threshold
+
+        -- Safety: cek apakah harga jual cocok dengan variant LAIN (beda finisher/category)
+        if isUnderrap then
+            for _, other in ipairs(finisherOther) do
+                local low  = other.value - DEFAULT_UNDER
+                local high = other.value * 1.5
+                if sellPrice >= low and sellPrice <= high then
+                    return other, false -- harga cocok variant lain, bukan underrap
+                end
+            end
+        end
+
+        return v, isUnderrap
+    end
+
+    -- Step 3: Multiple variant di pool (beda category: Sword/Emote/Explosion)
+    -- Cari variant yang value-nya paling DEKAT dengan harga jual
+    -- Ini menghindari false positive: dijual 300, Sword=2500, Emote=300 → match Emote
+    local closestVariant = nil
+    local closestDiff = math.huge
+    for _, v in ipairs(pool) do
+        local diff = math.abs(v.value - sellPrice)
+        if diff < closestDiff then
+            closestDiff = diff
+            closestVariant = v
         end
     end
-    return best
+
+    -- Cek juga variant di luar pool (beda finisher) untuk safety
+    for _, v in ipairs(finisherOther) do
+        local diff = math.abs(v.value - sellPrice)
+        if diff < closestDiff then
+            closestDiff = diff
+            closestVariant = v
+        end
+    end
+
+    -- Kalau harga jual dekat dengan closest variant → bukan underrap
+    if closestVariant then
+        local low  = closestVariant.value - DEFAULT_UNDER
+        local high = closestVariant.value * 1.5
+        if sellPrice >= low and sellPrice <= high then
+            return closestVariant, false -- harga wajar untuk variant ini
+        end
+    end
+
+    -- Step 4: Harga jual tidak dekat dengan variant manapun
+    -- Cek apakah underrap terhadap variant TERMURAH di pool
+    -- (pakai termurah supaya aman — kalau di bawah yang termurah pun, baru underrap)
+    local cheapest = pool[1]
+    for i = 2, #pool do
+        if pool[i].value < cheapest.value then
+            cheapest = pool[i]
+        end
+    end
+
+    local threshold = cheapest.value - DEFAULT_UNDER
+    local isUnderrap = sellPrice <= threshold
+
+    -- Final safety: cek semua variant (termasuk beda finisher)
+    if isUnderrap then
+        for _, v in ipairs(variants) do
+            if sellPrice >= (v.value * 0.5) and sellPrice <= (v.value * 1.5) then
+                return v, false -- harga masuk range wajar variant ini
+            end
+        end
+    end
+
+    return cheapest, isUnderrap
 end
 
 -- ── BOOTH SCAN ────────────────────────────────────────────────────────────────
@@ -587,17 +674,14 @@ scanAllBooths = function(values)
             local variants  = values[key]
             if not variants then continue end
 
-            -- Pilih variant terbaik berdasarkan finisher status di booth
-            local valueData = pickBestVariant(variants, item.finisher)
+            -- Analisis smart: cek apakah harga jual cocok dengan variant manapun
+            local sellPrice = parseNumber(item.price)
+            local variantCount = #variants
+            local valueData, isUnderrap = analyzeItem(variants, item.finisher, sellPrice)
+            if not valueData then continue end -- tidak bisa parse harga
             local realValue = valueData.value
             local category  = valueData.category
             local rarity    = valueData.rarity
-            local sellPrice = parseNumber(item.price)
-            local variantCount = #variants
-
-            -- Underrap: selling below (value - DEFAULT_UNDER)
-            local threshold = realValue - DEFAULT_UNDER
-            local isUnderrap = sellPrice ~= nil and sellPrice <= threshold
 
             table.insert(results, string.format(
                 "%s | Price: %s | Value: %s | Cat: %s | Rarity: %s%s%s%s",
