@@ -1,5 +1,6 @@
--- main.luau
--- Blade Ball Booth Scanner + Auto Server Hop
+-- main_bbvalues.luau
+-- Blade Ball Booth Scanner — Values langsung dari bbvalues.uk
+-- Hanya scan item dengan value > 100
 -- Made by Rei
 
 local Players         = game:GetService("Players")
@@ -8,19 +9,20 @@ local HttpService     = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 
 -- ── CONFIG ────────────────────────────────────────────────────────────────────
-local ROOT_PLACE_ID = 16581637217 -- Blade Ball plaza (root place)
-local PLACE_ID      = ROOT_PLACE_ID -- always use root for server list & teleport
+local ROOT_PLACE_ID = 16581637217
+local PLACE_ID      = ROOT_PLACE_ID
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1510395545141907478/cN3zzPCevXKBL4nEBefV7Z6m_ufHSUYjlBHKyPK8sZGl2VufTkamnNpxL58DWvF5z7hs"
-local VALUES_URL  = "http://hyper.ypnode.my.id:10750/values.json" -- server-hosted, no ngrok
-local SCANS_URL   = "http://hyper.ypnode.my.id:10750/scans"       -- POST scan results for dashboard
-local HOP_SKIP_COUNT  = 20
+local SCANS_URL   = "http://hyper.ypnode.my.id:10750/scans"
+local MIN_VALUE      = 100 -- hanya scan item dengan value > ini
+local DEFAULT_UNDER  = 20  -- default under deduction
+local HOP_SKIP_COUNT = 20
 local HOP_HISTORY_FILE = "hop_history.json"
 local SCANNED_SERVERS_FILE = "scanned_servers.json"
 -- ─────────────────────────────────────────────────────────────────────────────
 
 local hopHistory = {}
-local scannedServers = {} -- track which servers have been scanned
-local isTeleporting = false -- guard against duplicate scans during teleport
+local scannedServers = {}
+local isTeleporting = false
 
 local function loadHopHistory()
     if readfile then
@@ -71,7 +73,6 @@ end
 
 local function markServerScanned(jobId)
     scannedServers[jobId] = os.time()
-    -- Clean old entries (older than 5 minutes)
     local now = os.time()
     local cleaned = {}
     for id, t in pairs(scannedServers) do
@@ -98,7 +99,7 @@ Library.ForceCheckbox = false
 Library.ShowToggleFrameInKeybinds = true
 
 local Window = Library:CreateWindow({
-    Title = "Booth Scanner",
+    Title = "Booth Scanner (BBValues)",
     Footer = "Made by Rei",
     Icon = 95816097006870,
     NotifySide = "Right",
@@ -107,12 +108,14 @@ local Window = Library:CreateWindow({
 
 -- ── UTILITY ───────────────────────────────────────────────────────────────────
 
-local function httpGet(url)
+local function httpGet(url, extraHeaders)
     local headers = {
-        ["User-Agent"] = "Mozilla/5.0",
+        ["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         ["Accept"] = "application/json",
-        ["ngrok-skip-browser-warning"] = "true",
     }
+    if extraHeaders then
+        for k, v in pairs(extraHeaders) do headers[k] = v end
+    end
     if request then
         local ok, res = pcall(request, { Url = url, Method = "GET", Headers = headers })
         if ok and res and res.Body and res.Body ~= "" then return res.Body end
@@ -140,7 +143,6 @@ local function getDisplayName(userId)
     local ok, info = pcall(function()
         local player = Players:GetPlayerByUserId(userId)
         if player then return player.DisplayName end
-        -- fallback: use username
         return nil
     end)
     return ok and info or nil
@@ -170,39 +172,58 @@ local function postScanToAPI(data)
     end
 end
 
--- ── VALUES ────────────────────────────────────────────────────────────────────
+-- ── BBVALUES.UK API ───────────────────────────────────────────────────────────
+-- Fetch langsung dari bbvalues.uk/api/items
+-- Response: array of { id, n(name), c(category), p(price/value), r(rarity),
+--                       st(status), tg(tag), ch(change24h), a(avgPrice), f(finisher) }
 
-local function loadValues()
-    print("[values] Fetching: " .. VALUES_URL)
-    local body = httpGet(VALUES_URL)
+local function loadBBValues()
+    print("[bbvalues] Fetching from bbvalues.uk/api/items...")
+    local body = httpGet("https://bbvalues.uk/api/items", {
+        ["x-bbv-handshake"] = "v1-secure-request",
+        ["Referer"] = "https://bbvalues.uk/values/",
+    })
     if not body then
-        warn("[values] httpGet returned nil")
+        warn("[bbvalues] httpGet returned nil")
         return {}
     end
-    -- Guard: ngrok returned HTML instead of JSON
-    if body:sub(1, 1) ~= "{" and body:sub(1, 1) ~= "[" then
-        warn("[values] Response is not JSON (got HTML?): " .. body:sub(1, 100))
+    if body:sub(1, 1) ~= "[" then
+        warn("[bbvalues] Response is not JSON array: " .. body:sub(1, 100))
         return {}
     end
     local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
-    if not ok then
-        warn("[values] JSONDecode failed: " .. tostring(data))
+    if not ok or type(data) ~= "table" then
+        warn("[bbvalues] JSONDecode failed")
         return {}
     end
-    if not data or not data.items then
-        warn("[values] No 'items' field")
-        return {}
-    end
-    local normalized = {}
+
+    -- Build lookup: lowercase name -> { value, category, rarity, status, tag, finisher }
+    local values = {}
     local count = 0
-    for k, v in pairs(data.items) do
-        if not v.disabled then
-            normalized[string.lower(k)] = v
-            count += 1
+    local filtered = 0
+    for _, item in ipairs(data) do
+        local name = item.n
+        local value = item.p -- "p" = price/value
+        if name and value then
+            if value > MIN_VALUE then
+                values[string.lower(name)] = {
+                    value    = value,
+                    category = item.c or "unknown",
+                    rarity   = item.r or "NORMAL",
+                    status   = item.st or "stable",
+                    tag      = item.tg or "",
+                    finisher = item.f == true,
+                    avg      = item.a or 0,
+                    change   = item.ch or 0,
+                }
+                count += 1
+            else
+                filtered += 1
+            end
         end
     end
-    print("[values] Loaded " .. count .. " items")
-    return normalized
+    print(string.format("[bbvalues] Loaded %d items (filtered %d with value <= %d)", count, filtered, MIN_VALUE))
+    return values
 end
 
 -- ── BOOTH SCAN ────────────────────────────────────────────────────────────────
@@ -284,25 +305,21 @@ end
 local function pickNextServer()
     local servers = getServerList()
     if #servers == 0 then return nil end
-    -- shuffle
     for i = #servers, 2, -1 do
         local j = math.random(i)
         servers[i], servers[j] = servers[j], servers[i]
     end
     local currentJob = game.JobId
-    -- First pass: skip current, history, and already-scanned servers
     for _, s in ipairs(servers) do
         if s.jobId ~= currentJob and not isInHistory(s.jobId) and not isServerScanned(s.jobId) then
             return s.jobId
         end
     end
-    -- Second pass: allow already-scanned but not in history
     for _, s in ipairs(servers) do
         if s.jobId ~= currentJob and not isInHistory(s.jobId) then
             return s.jobId
         end
     end
-    -- All in history — reset
     warn("[hop] All servers in history, resetting")
     hopHistory = {}
     saveHopHistory()
@@ -312,7 +329,6 @@ local function pickNextServer()
     return nil
 end
 
--- Aggressive hop: try multiple servers quickly
 local function doHop(reason)
     local currentJob = game.JobId
     for attempt = 1, 5 do
@@ -327,9 +343,8 @@ local function doHop(reason)
         joinServer(nextServer)
         task.wait(6)
         if game.JobId ~= currentJob then
-            return true -- teleport succeeded
+            return true
         end
-        -- Failed — mark this server as bad and try another
         isTeleporting = false
         addToHistory(nextServer)
         warn("[hop] Teleport failed attempt " .. attempt)
@@ -353,16 +368,13 @@ local function stopAutoScan()
     end
 end
 
--- forward declare — assigned BEFORE startAutoScan is ever called
 local scanAllBooths = nil
 
 local function startAutoScan()
     stopAutoScan()
     autoScanThread = task.spawn(function()
-        -- wait until scanAllBooths is assigned (it's defined later in the file)
         while scanAllBooths == nil do task.wait(0.1) end
         while autoScanEnabled do
-            -- Guard: don't scan if we're teleporting
             if isTeleporting then
                 print("[auto] Teleporting, skipping scan")
                 task.wait(2)
@@ -371,13 +383,12 @@ local function startAutoScan()
 
             local currentJob = game.JobId
 
-            -- Skip if this server was already scanned
             if isServerScanned(currentJob) then
                 print("[auto] Server " .. currentJob:sub(1, 8) .. " already scanned")
                 if autoHopEnabled then
                     doHop("Already scanned")
                     if game.JobId == currentJob then
-                        task.wait(10) -- all hops failed, cooldown
+                        task.wait(10)
                     end
                 else
                     task.wait(5)
@@ -385,11 +396,11 @@ local function startAutoScan()
                 continue
             end
 
-            local values = loadValues()
+            local values = loadBBValues()
             if next(values) then
                 scanAllBooths(values)
             else
-                Library:Notify({ Title = "Auto Scan", Description = "Failed to load values, retry in 5s", Time = 3 })
+                Library:Notify({ Title = "Auto Scan", Description = "Failed to load bbvalues, retry in 5s", Time = 3 })
                 task.wait(5)
             end
             if autoScanEnabled and not autoHopEnabled then
@@ -400,7 +411,6 @@ local function startAutoScan()
 end
 
 scanAllBooths = function(values)
-    -- Guard: don't scan if teleporting
     if isTeleporting then
         print("[scanner] Skipping scan — teleporting")
         return
@@ -408,7 +418,6 @@ scanAllBooths = function(values)
 
     local currentJobId = game.JobId
 
-    -- Guard: don't scan same server twice
     if isServerScanned(currentJobId) then
         print("[scanner] Server " .. currentJobId:sub(1, 8) .. " already scanned, skipping")
         return
@@ -459,38 +468,39 @@ scanAllBooths = function(values)
             if not valueData then continue end
 
             local realValue = valueData.value
-            local underVal  = valueData.under or 0
-            -- threshold = value - under (under=0 means default: value - 30)
-            local deduction = (underVal > 0) and underVal or 30
-            local threshold = realValue - deduction
-            local category  = valueData.category or "unknown"
+            local category  = valueData.category
+            local rarity    = valueData.rarity
             local sellPrice = parseNumber(item.price)
-            local isUnderrap = threshold ~= nil and sellPrice ~= nil and sellPrice <= threshold
+
+            -- Underrap: selling below (value - DEFAULT_UNDER)
+            local threshold = realValue - DEFAULT_UNDER
+            local isUnderrap = sellPrice ~= nil and sellPrice <= threshold
 
             table.insert(results, string.format(
-                "%s | Price: %s | Value: %s | Cat: %s%s%s",
-                item.name, item.price, tostring(realValue), category,
+                "%s | Price: %s | Value: %s | Cat: %s | Rarity: %s%s%s",
+                item.name, item.price, tostring(realValue), category, rarity,
                 item.finisher and " | FINISHER" or "",
                 isUnderrap and " | <UNDERRAP>" or ""
             ))
 
             if isUnderrap then
                 underrapCount += 1
-                local profit = threshold - sellPrice
-                local pctOff = math.floor((1 - sellPrice / threshold) * 100)
+                local profit = realValue - sellPrice
+                local pctOff = math.floor((1 - sellPrice / realValue) * 100)
                 sendWebhook({
                     embeds = {{
-                        title = "🎯 UNDERRAP FOUND",
-                        description = string.format("**%s** is selling **%d%%** below %s!", item.name, pctOff, underVal > 0 and "under threshold" or "value"),
+                        title = "🎯 UNDERRAP FOUND (BBValues)",
+                        description = string.format("**%s** selling **%d%%** below value!", item.name, pctOff),
                         color = 0x00FF88,
                         fields = {
                             { name = "📦 Item",       value = item.name,                                    inline = true },
                             { name = "💰 Price",      value = string.format("`%s`", tostring(item.price)),  inline = true },
                             { name = "💎 Value",      value = string.format("`%s`", tostring(realValue)),   inline = true },
-                            { name = "🔻 Under",      value = string.format("`%s`", underVal > 0 and tostring(underVal) or "—"), inline = true },
+                            { name = "🏷️ Rarity",    value = rarity,                                       inline = true },
                             { name = "📈 Profit",     value = string.format("`+%s`", tostring(profit)),     inline = true },
                             { name = "🏷️ Category",  value = category,                                     inline = true },
                             { name = "⚔️ Finisher",  value = item.finisher and "✨ Yes" or "No",           inline = true },
+                            { name = "📊 Status",     value = valueData.status,                             inline = true },
                             { name = "👤 Seller",    value = string.format("[%s](https://www.roblox.com/users/%s/profile)", username, tostring(ownerId)), inline = true },
                             { name = "🔗 Join Server", value = string.format("[Click to Join](%s)", joinLink), inline = true },
                             { name = "📋 Join Script", value = string.format(
@@ -502,11 +512,10 @@ scanAllBooths = function(values)
                             ), inline = false },
                             { name = "🆔 Job ID", value = string.format("`%s`", currentJobId), inline = false },
                         },
-                        footer = { text = "Underrap Scanner · " .. currentJobId },
+                        footer = { text = "BBValues Scanner · " .. currentJobId },
                         timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
                     }},
                 })
-                -- Also POST to bot API for C++ dashboard
                 postScanToAPI({
                     item_name  = item.name,
                     price      = sellPrice or 0,
@@ -530,7 +539,6 @@ scanAllBooths = function(values)
     local output = table.concat(results, "\n")
     if writefile then writefile("booth_scan_results.txt", output) end
 
-    -- Mark this server as scanned AFTER completing scan
     markServerScanned(currentJobId)
 
     Library:Notify({
@@ -554,30 +562,30 @@ local Tabs = {
 }
 
 -- ── SCANNER TAB ──
-local MainGroup = Tabs.Main:AddGroupbox({ Side = "Left", Name = "Scanner" })
+local MainGroup = Tabs.Main:AddGroupbox({ Side = "Left", Name = "Scanner (BBValues)" })
+
+MainGroup:AddLabel("Values dari bbvalues.uk (min > " .. MIN_VALUE .. ")")
+MainGroup:AddDivider()
 
 MainGroup:AddButton({
     Text = "Scan All Booths",
     Func = function()
-        local values = loadValues()
+        local values = loadBBValues()
         if not next(values) then
-            Library:Notify({ Title = "Error", Description = "Failed to load values", Time = 5 })
+            Library:Notify({ Title = "Error", Description = "Failed to load bbvalues", Time = 5 })
             return
         end
         task.spawn(scanAllBooths, values)
     end,
-    Tooltip = "Scan all booths and send webhook on underrap",
+    Tooltip = "Scan all booths using bbvalues.uk prices",
 })
 
 MainGroup:AddDivider()
 
--- NOTE: Callback here handles manual toggle clicks.
--- Init (on script load) is handled separately in the INIT section below.
--- OnChanged is NOT used — Callback is sufficient for runtime changes.
 MainGroup:AddToggle("AutoScan", {
     Default = false,
     Text = "Auto Scan",
-    Tooltip = "Continuously scan booths. State is saved.",
+    Tooltip = "Continuously scan booths",
     Callback = function(val)
         autoScanEnabled = val
         if val then
@@ -592,11 +600,9 @@ MainGroup:AddToggle("AutoScan", {
 MainGroup:AddToggle("AutoHop", {
     Default = false,
     Text = "Auto Change Server",
-    Tooltip = string.format("Hop to next server after scan (skip last %d). Works with or without Auto Scan.", HOP_SKIP_COUNT),
+    Tooltip = string.format("Hop to next server after scan (skip last %d)", HOP_SKIP_COUNT),
     Callback = function(val)
         autoHopEnabled = val
-        -- If auto hop enabled but auto scan is not running, start auto scan too
-        -- (auto hop needs the scan loop to function)
         if val and not autoScanEnabled then
             autoScanEnabled = true
             Toggles.AutoScan:SetValue(true)
@@ -607,8 +613,6 @@ MainGroup:AddToggle("AutoHop", {
 })
 
 MainGroup:AddDivider()
-
--- Webhook & Values URL are hardcoded — no GUI input needed
 
 -- ── SERVERS TAB ──
 local ServerGroup = Tabs.Server:AddGroupbox({ Side = "Left", Name = "Server List" })
@@ -689,42 +693,31 @@ ThemeManager:SetLibrary(Library)
 SaveManager:SetLibrary(Library)
 SaveManager:IgnoreThemeSettings()
 SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
-ThemeManager:SetFolder("BoothScanner")
-SaveManager:SetFolder("BoothScanner")
+ThemeManager:SetFolder("BoothScannerBBV")
+SaveManager:SetFolder("BoothScannerBBV")
 SaveManager:BuildConfigSection(Tabs.UISett)
 ThemeManager:ApplyToTab(Tabs.UISett)
 SaveManager:LoadAutoloadConfig()
 
 -- ── INIT ──────────────────────────────────────────────────────────────────────
--- LoadAutoloadConfig applies saved toggle values but does NOT fire Callbacks.
--- We read the toggle values directly after a short wait and start if needed.
 
 loadHopHistory()
 loadScannedServers()
 
--- ── AUTO TELEPORT TO PLAZA ────────────────────────────────────────────────────
--- If we're in a sub-place (not the root plaza), teleport back to plaza
 if game.PlaceId ~= ROOT_PLACE_ID then
     Library:Notify({ Title = "Wrong Place", Description = "Teleporting to Plaza...", Time = 5 })
-    warn("[init] Current PlaceId=" .. tostring(game.PlaceId) .. " != ROOT=" .. tostring(ROOT_PLACE_ID) .. ", teleporting to plaza")
     task.wait(2)
     TeleportService:Teleport(ROOT_PLACE_ID, LocalPlayer)
-    -- Script will restart after teleport, so stop here
     return
 end
 
-Library:Notify({ Title = "Booth Scanner", Description = "Loaded", Time = 3 })
+Library:Notify({ Title = "BBValues Scanner", Description = string.format("Loaded (min value: %d)", MIN_VALUE), Time = 3 })
 
 task.spawn(function()
-    task.wait(1) -- let Obsidian finish applying saved config
-
-    -- Sync runtime vars from saved toggle state
+    task.wait(1)
     autoHopEnabled  = Toggles.AutoHop.Value
     autoScanEnabled = Toggles.AutoScan.Value
-
     print("[init] AutoScan=" .. tostring(autoScanEnabled) .. " AutoHop=" .. tostring(autoHopEnabled))
-    print("[init] VALUES_URL=" .. VALUES_URL)
-
     if autoScanEnabled then
         Library:Notify({ Title = "Auto Scan", Description = "Resuming from saved config", Time = 4 })
         startAutoScan()
