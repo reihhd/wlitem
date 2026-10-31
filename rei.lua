@@ -194,33 +194,149 @@ end)
 -- ── VALUES ────────────────────────────────────────────────────────────────────
 
 local MANUAL_URL = "http://hyper.ypnode.my.id:10750/items.json"
+local BBVALUES_URL = "https://bbvalues.uk/api/items"
+local BBVALUES_CACHE_FILE = "bbvalues_cache.json"
+local BBVALUES_CACHE_TTL  = 300 -- 5 menit
+local cachedBBValues = nil
+local lastBBFetchTime = 0
 
-local function loadValues()
-    print("[values] Fetching: " .. VALUES_URL)
+-- ── BBVALUES.UK API (source: auto) ────────────────────────────────────────────
+
+local function loadBBValues()
+    -- 1. In-memory cache masih fresh
+    if cachedBBValues and (os.time() - lastBBFetchTime) < BBVALUES_CACHE_TTL then
+        return cachedBBValues
+    end
+
+    -- 2. Fetch dari API (retry 3x)
+    for attempt = 1, 3 do
+        local body = nil
+        local headers = {
+            ["User-Agent"] = "Mozilla/5.0",
+            ["Accept"] = "application/json",
+            ["x-bbv-handshake"] = "v1-secure-request",
+            ["Referer"] = "https://bbvalues.uk/values/",
+        }
+        local opts = { Url = BBVALUES_URL, Method = "GET", Headers = headers }
+        if request then
+            local ok, res = pcall(request, opts)
+            if ok and res and res.Body and res.Body ~= "" then body = res.Body end
+        end
+        if not body and syn and syn.request then
+            local ok, res = pcall(syn.request, opts)
+            if ok and res and res.Body and res.Body ~= "" then body = res.Body end
+        end
+        if not body then
+            local ok2, res2 = pcall(function() return HttpService:GetAsync(BBVALUES_URL) end)
+            if ok2 and res2 then body = res2 end
+        end
+
+        if body and body:sub(1, 1) == "[" then
+            local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+            if ok and type(data) == "table" and #data > 100 then
+                -- Save file cache
+                if writefile then pcall(writefile, BBVALUES_CACHE_FILE, body) end
+
+                -- Build lookup: key = lowercase name, value = list of variants
+                local normalized = {}
+                local count = 0
+                for _, item in ipairs(data) do
+                    local name, value = item.n, item.p
+                    if name and value and value > 0 then
+                        local key = string.lower(name)
+                        local fin = (item.s == "Finisher")
+                        local nkey = key .. (fin and "|1" or "|0")
+                        normalized[nkey] = {
+                            value    = value,
+                            under    = 0,
+                            category = item.c or "unknown",
+                            finisher = fin,
+                            source   = "auto",
+                        }
+                        count += 1
+                    end
+                end
+                if count > 0 then
+                    print("[bbvalues] Loaded " .. count .. " items from API")
+                    cachedBBValues = normalized
+                    lastBBFetchTime = os.time()
+                    return normalized
+                end
+            end
+        end
+        if attempt < 3 then task.wait(attempt * 3) end
+    end
+
+    -- 3. Expired in-memory cache
+    if cachedBBValues then
+        warn("[bbvalues] API failed, using expired cache")
+        return cachedBBValues
+    end
+
+    -- 4. File cache
+    if readfile then
+        local ok, content = pcall(readfile, BBVALUES_CACHE_FILE)
+        if ok and content and content:sub(1, 1) == "[" then
+            local ok2, fileData = pcall(function() return HttpService:JSONDecode(content) end)
+            if ok2 and type(fileData) == "table" and #fileData > 100 then
+                local normalized = {}
+                local count = 0
+                for _, item in ipairs(fileData) do
+                    local name, value = item.n, item.p
+                    if name and value and value > 0 then
+                        local key = string.lower(name)
+                        local fin = (item.s == "Finisher")
+                        local nkey = key .. (fin and "|1" or "|0")
+                        normalized[nkey] = {
+                            value    = value,
+                            under    = 0,
+                            category = item.c or "unknown",
+                            finisher = fin,
+                            source   = "auto",
+                        }
+                        count += 1
+                    end
+                end
+                if count > 0 then
+                    warn("[bbvalues] Using file cache (" .. count .. " items)")
+                    cachedBBValues = normalized
+                    lastBBFetchTime = os.time() - BBVALUES_CACHE_TTL + 60
+                    return normalized
+                end
+            end
+        end
+    end
+
+    warn("[bbvalues] All attempts failed")
+    return {}
+end
+
+-- ── MANUAL VALUES (dari Bot DB, source: manual) ──────────────────────────────
+
+local function loadManualValues()
+    print("[manual] Fetching: " .. VALUES_URL)
     local body = httpGet(VALUES_URL)
     if not body then
-        warn("[values] httpGet returned nil")
+        warn("[manual] httpGet returned nil")
         return {}
     end
-    -- Guard: ngrok returned HTML instead of JSON
     if body:sub(1, 1) ~= "{" and body:sub(1, 1) ~= "[" then
-        warn("[values] Response is not JSON (got HTML?): " .. body:sub(1, 100))
+        warn("[manual] Response is not JSON (got HTML?): " .. body:sub(1, 100))
         return {}
     end
     local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
     if not ok then
-        warn("[values] JSONDecode failed: " .. tostring(data))
+        warn("[manual] JSONDecode failed: " .. tostring(data))
         return {}
     end
     if not data or not data.items then
-        warn("[values] No 'items' field")
+        warn("[manual] No 'items' field")
         return {}
     end
     local normalized = {}
     local count = 0
     for k, v in pairs(data.items) do
         if not v.disabled then
-            -- Keys from /values.json may be "Name" or "Name|fin"
             local rawName = v.name or k:gsub("|fin$", "")
             local fin = v.finisher and true or false
             local nkey = string.lower(rawName) .. (fin and "|1" or "|0")
@@ -234,11 +350,11 @@ local function loadValues()
             count += 1
         end
     end
-    print("[values] Loaded " .. count .. " items")
+    print("[manual] Loaded " .. count .. " items from /values.json")
     return normalized
 end
 
--- Load manual items from /items.json (new CRUD endpoint)
+-- Load manual items from /items.json (new CRUD endpoint) — merged into manualValues
 local function loadManualItems()
     print("[manual] Fetching: " .. MANUAL_URL)
     local body = httpGet(MANUAL_URL)
@@ -275,7 +391,7 @@ local function loadManualItems()
             count += 1
         end
     end
-    print("[manual] Loaded " .. count .. " manual items")
+    print("[manual] Loaded " .. count .. " manual items from /items.json")
     return normalized
 end
 
