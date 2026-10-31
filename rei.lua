@@ -169,7 +169,10 @@ local function postScanToAPI(data)
 end
 
 local function sendHeartbeat()
-    pcall(httpPost, HEARTBEAT_URL, { job_id = game.JobId })
+    pcall(httpPost, HEARTBEAT_URL, {
+        username = LocalPlayer.Name,
+        job_id   = game.JobId,
+    })
 end
 
 -- ── PLAYER INFO (cached) ─────────────────────────────────────────────────────
@@ -515,12 +518,12 @@ end
 
 -- ── SCAN ALL BOOTHS ───────────────────────────────────────────────────────────
 
-local function scanAllBooths(values, source)
+local function scanAllBooths(values, source, shouldMark)
     source = source or "auto"
+    if shouldMark == nil then shouldMark = true end
     if isTeleporting then return 0 end
 
     local currentJobId = game.JobId
-    if isServerScanned(currentJobId) then return 0 end
 
     local stands = workspace:FindFirstChild("Spawn")
         and workspace.Spawn:FindFirstChild("Hub")
@@ -655,7 +658,7 @@ local function scanAllBooths(values, source)
         if boothCount % 10 == 0 then RunService.Heartbeat:Wait() end
     end
 
-    markServerScanned(currentJobId)
+    if shouldMark then markServerScanned(currentJobId) end
     print(string.format("[scan] %d booths, %d underrap (%s)", boothCount, underrapCount, source))
     return underrapCount
 end
@@ -705,48 +708,59 @@ task.spawn(function()
         -- Skip jika sudah di-scan
         if isServerScanned(currentJob) then
             print("[auto] " .. currentJob:sub(1, 8) .. " already scanned → hopping")
-            doHop("Already scanned")
-            if game.JobId == currentJob then
-                task.wait(10)
+            local hopped = doHop("Already scanned")
+            if not hopped then
+                -- Gagal hop — tunggu lalu coba lagi
+                warn("[auto] Hop failed, retrying in 15s...")
+                task.wait(15)
             end
             continue
         end
 
-        -- Scan berdasarkan mode
-        local didScan = false
+        -- Load values sekali saja untuk kedua source
+        local bbValues, manualValues = nil, nil
 
         if SCAN_MODE == "auto" or SCAN_MODE == "both" then
-            local values = loadBBValues()
-            if values and next(values) then
-                scanAllBooths(values, "auto")
-                didScan = true
-            else
+            bbValues = loadBBValues()
+            if not bbValues or not next(bbValues) then
                 warn("[scan] Failed to load bbvalues")
+                bbValues = nil
             end
         end
 
         if SCAN_MODE == "manual" or SCAN_MODE == "both" then
-            local values = loadManualValues()
-            if values and next(values) then
-                scanAllBooths(values, "manual")
-                didScan = true
-            else
+            manualValues = loadManualValues()
+            if not manualValues or not next(manualValues) then
                 if SCAN_MODE == "manual" then
                     warn("[scan] Failed to load manual values")
                 end
+                manualValues = nil
             end
         end
 
-        if not didScan then
+        if not bbValues and not manualValues then
+            warn("[scan] No values available, retrying in 5s...")
             task.wait(5)
             continue
         end
 
+        -- Scan — jangan mark server scanned dulu, biar kedua source bisa scan
+        if bbValues then
+            scanAllBooths(bbValues, "auto", false) -- false = jangan mark scanned
+        end
+        if manualValues then
+            scanAllBooths(manualValues, "manual", false)
+        end
+
+        -- Sekarang mark scanned
+        markServerScanned(currentJob)
+        print("[scan] Server " .. currentJob:sub(1, 8) .. " fully scanned, hopping...")
+
         -- Hop ke server berikutnya
-        task.wait(0.5)
-        doHop("Scan done")
-        if game.JobId == currentJob then
-            task.wait(SCAN_COOLDOWN)
+        local hopped = doHop("Scan done")
+        if not hopped then
+            warn("[auto] Hop failed after scan, retrying in 15s...")
+            task.wait(15)
         end
     end
 end)
