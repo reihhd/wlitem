@@ -1,6 +1,5 @@
 -- main.luau
 -- Blade Ball Booth Scanner + Auto Server Hop
--- Headless (No GUI) — stripped from working GUI version
 -- Made by Rei
 
 local Players         = game:GetService("Players")
@@ -87,6 +86,26 @@ local function isServerScanned(jobId)
     return scannedServers[jobId] ~= nil
 end
 
+-- ── OBSIDIAN ──────────────────────────────────────────────────────────────────
+local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
+local Library      = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+local SaveManager  = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+
+local Options = Library.Options
+local Toggles = Library.Toggles
+
+Library.ForceCheckbox = false
+Library.ShowToggleFrameInKeybinds = true
+
+local Window = Library:CreateWindow({
+    Title = "Booth Scanner",
+    Footer = "Made by Rei",
+    Icon = 95816097006870,
+    NotifySide = "Right",
+    ShowCustomCursor = true,
+})
+
 -- ── UTILITY ───────────────────────────────────────────────────────────────────
 
 local function httpGet(url)
@@ -153,10 +172,7 @@ local function postScanToAPI(data)
 end
 
 local function sendHeartbeat()
-    local json = HttpService:JSONEncode({
-        username = LocalPlayer.Name,
-        job_id   = game.JobId,
-    })
+    local json = HttpService:JSONEncode({ username = LocalPlayer.Name, job_id = game.JobId })
     local opts = {
         Url = HEARTBEAT_URL, Method = "POST",
         Headers = { ["Content-Type"] = "application/json" }, Body = json,
@@ -374,7 +390,7 @@ end
 local function doHop(reason)
     local currentJob = game.JobId
     for attempt = 1, 5 do
-        print(string.format("[hop] %s (%d/5)", reason, attempt))
+        Library:Notify({ Title = "Auto Hop", Description = string.format("%s (%d/5)", reason, attempt), Time = 2 })
         local nextServer = pickNextServer()
         if not nextServer then
             warn("[hop] No server found, attempt " .. attempt)
@@ -394,14 +410,14 @@ local function doHop(reason)
         task.wait(1)
     end
     isTeleporting = false
-    warn("[hop] All 5 attempts failed")
+    Library:Notify({ Title = "Auto Hop", Description = "All attempts failed", Time = 5 })
     return false
 end
 
 -- ── SCAN ALL BOOTHS ───────────────────────────────────────────────────────────
 
-local autoHopEnabled  = true   -- hardcoded ON (was GUI toggle)
-local autoScanEnabled = true   -- hardcoded ON (was GUI toggle)
+local autoHopEnabled  = false
+local autoScanEnabled = false
 local autoScanThread  = nil
 
 local function stopAutoScan()
@@ -448,7 +464,7 @@ local function startAutoScan()
             if next(values) or next(manualValues) then
                 scanAllBooths(values, manualValues)
             else
-                print("[auto] Failed to load values, retry in 5s")
+                Library:Notify({ Title = "Auto Scan", Description = "Failed to load values, retry in 5s", Time = 3 })
                 task.wait(5)
             end
             if autoScanEnabled and not autoHopEnabled then
@@ -480,6 +496,7 @@ scanAllBooths = function(values, manualValues)
 
     if not stands then
         warn("[scanner] Stands not found")
+        Library:Notify({ Title = "Error", Description = "Stands not found", Time = 5 })
         return
     end
 
@@ -634,6 +651,7 @@ scanAllBooths = function(values, manualValues)
                 end
 
                 -- POST to bot API: send auto scan if auto found underrap
+                -- (always send auto separately, even if manual also found it)
                 if autoUnderrap then
                     postScanToAPI({
                         item_name  = item.name,
@@ -650,6 +668,10 @@ scanAllBooths = function(values, manualValues)
                     })
                 end
 
+                -- If only manual found underrap (no auto), still send as the primary
+                -- If only auto found underrap (no manual), already sent above
+                -- If neither has manual data nor auto data, we already continued above
+
                 task.wait(0.1)
             end
         end
@@ -664,7 +686,11 @@ scanAllBooths = function(values, manualValues)
     -- Mark this server as scanned AFTER completing scan
     markServerScanned(currentJobId)
 
-    print(string.format("[scan] %d booths, %d underrap", boothCount, underrapCount))
+    Library:Notify({
+        Title = "Scan Complete",
+        Description = string.format("%d booths, %d underrap", boothCount, underrapCount),
+        Time = 5,
+    })
 
     if autoHopEnabled then
         task.wait(0.5)
@@ -672,20 +698,196 @@ scanAllBooths = function(values, manualValues)
     end
 end
 
+-- ── GUI ───────────────────────────────────────────────────────────────────────
+
+local Tabs = {
+    Main   = Window:AddTab("Scanner",     "search"),
+    Server = Window:AddTab("Servers",     "server"),
+    UISett = Window:AddTab("UI Settings", "settings"),
+}
+
+-- ── SCANNER TAB ──
+local MainGroup = Tabs.Main:AddGroupbox({ Side = "Left", Name = "Scanner" })
+
+MainGroup:AddButton({
+    Text = "🔄 Refresh Values",
+    Func = function()
+        task.spawn(function()
+            Library:Notify({ Title = "Refresh", Description = "Fetching values...", Time = 2 })
+
+            local autoVals = loadValues()
+            local manualVals = loadManualItems()
+
+            local autoCount = 0
+            local manualCount = 0
+            if autoVals then for _ in pairs(autoVals) do autoCount += 1 end end
+            if manualVals then for _ in pairs(manualVals) do manualCount += 1 end end
+
+            -- Clear scanned status for current server so it can be re-scanned
+            local currentJob = game.JobId
+            if scannedServers[currentJob] then
+                scannedServers[currentJob] = nil
+                saveScannedServers()
+            end
+
+            Library:Notify({
+                Title = "Refresh Complete",
+                Description = string.format("Auto: %d | Manual: %d", autoCount, manualCount),
+                Time = 5,
+            })
+        end)
+    end,
+    Tooltip = "Force fetch ulang Auto + Manual values",
+})
+
+MainGroup:AddDivider()
+
+MainGroup:AddButton({
+    Text = "Scan All Booths",
+    Func = function()
+        local values = loadValues()
+        local manualVals = loadManualItems()
+        if not next(values) and not next(manualVals) then
+            Library:Notify({ Title = "Error", Description = "Failed to load values", Time = 5 })
+            return
+        end
+        task.spawn(scanAllBooths, values, manualVals)
+    end,
+    Tooltip = "Scan all booths and send webhook on underrap",
+})
+
+MainGroup:AddDivider()
+
+-- NOTE: Callback here handles manual toggle clicks.
+-- Init (on script load) is handled separately in the INIT section below.
+-- OnChanged is NOT used — Callback is sufficient for runtime changes.
+MainGroup:AddToggle("AutoScan", {
+    Default = false,
+    Text = "Auto Scan",
+    Tooltip = "Continuously scan booths. State is saved.",
+    Callback = function(val)
+        autoScanEnabled = val
+        if val then
+            startAutoScan()
+        else
+            stopAutoScan()
+            Library:Notify({ Title = "Auto Scan", Description = "Stopped", Time = 3 })
+        end
+    end,
+})
+
+MainGroup:AddToggle("AutoHop", {
+    Default = false,
+    Text = "Auto Change Server",
+    Tooltip = string.format("Hop to next server after scan (skip last %d). Works with or without Auto Scan.", HOP_SKIP_COUNT),
+    Callback = function(val)
+        autoHopEnabled = val
+        -- If auto hop enabled but auto scan is not running, start auto scan too
+        -- (auto hop needs the scan loop to function)
+        if val and not autoScanEnabled then
+            autoScanEnabled = true
+            Toggles.AutoScan:SetValue(true)
+            startAutoScan()
+            Library:Notify({ Title = "Auto Hop", Description = "Auto Scan enabled automatically", Time = 3 })
+        end
+    end,
+})
+
+MainGroup:AddDivider()
+
+-- Webhook & Values URL are hardcoded — no GUI input needed
+
+-- ── SERVERS TAB ──
+local ServerGroup = Tabs.Server:AddGroupbox({ Side = "Left", Name = "Server List" })
+local cachedServers = {}
+
+ServerGroup:AddButton({
+    Text = "Refresh Server List",
+    Func = function()
+        cachedServers = getServerList()
+        if #cachedServers == 0 then
+            Library:Notify({ Title = "Error", Description = "Failed to get server list", Time = 5 })
+            return
+        end
+        local names = {}
+        for i, s in ipairs(cachedServers) do
+            table.insert(names, string.format("Server %d (%d/%d)", i, s.players, s.maxPlayers))
+        end
+        Options.ServerDropdown:SetValues(names)
+        Library:Notify({ Title = "Server List", Description = #cachedServers .. " servers found", Time = 4 })
+    end,
+})
+
+ServerGroup:AddDropdown("ServerDropdown", {
+    Values  = { "Not refreshed" },
+    Default = 1,
+    Multi   = false,
+    Text    = "Select Server",
+})
+
+ServerGroup:AddButton({
+    Text = "Join Selected Server",
+    Func = function()
+        local selected = Options.ServerDropdown.Value
+        for i, s in ipairs(cachedServers) do
+            local name = string.format("Server %d (%d/%d)", i, s.players, s.maxPlayers)
+            if name == selected then joinServer(s.jobId) return end
+        end
+        Library:Notify({ Title = "Error", Description = "Refresh server list first", Time = 4 })
+    end,
+})
+
+ServerGroup:AddDivider()
+
+ServerGroup:AddButton({
+    Text = "Hop to Random Server",
+    Func = function()
+        Library:Notify({ Title = "Hopping...", Description = "Finding server...", Time = 3 })
+        task.spawn(function()
+            doHop("Manual hop")
+        end)
+    end,
+    Tooltip = string.format("Skip last %d servers", HOP_SKIP_COUNT),
+})
+
+ServerGroup:AddButton({
+    Text = "Reset Hop History",
+    Func = function()
+        hopHistory = {}
+        saveHopHistory()
+        Library:Notify({ Title = "Hop History", Description = "History cleared", Time = 3 })
+    end,
+})
+
+-- ── UI SETTINGS ──
+local MenuGroup = Tabs.UISett:AddGroupbox({ Side = "Left", Name = "Menu", IconName = "wrench" })
+
+MenuGroup:AddToggle("KeybindMenuOpen", {
+    Default  = Library.KeybindFrame.Visible,
+    Text     = "Show Keybind Menu",
+    Callback = function(val) Library.KeybindFrame.Visible = val end,
+})
+
+MenuGroup:AddButton("Unload", function() Library:Unload() end)
+
+Library.ToggleKeybind = Options.MenuKeybind
+
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
+ThemeManager:SetFolder("BoothScanner")
+SaveManager:SetFolder("BoothScanner")
+SaveManager:BuildConfigSection(Tabs.UISett)
+ThemeManager:ApplyToTab(Tabs.UISett)
+SaveManager:LoadAutoloadConfig()
+
 -- ── INIT ──────────────────────────────────────────────────────────────────────
+-- LoadAutoloadConfig applies saved toggle values but does NOT fire Callbacks.
+-- We read the toggle values directly after a short wait and start if needed.
 
 loadHopHistory()
 loadScannedServers()
-
--- ── AUTO TELEPORT TO PLAZA ────────────────────────────────────────────────────
--- If we're in a sub-place (not the root plaza), teleport back to plaza
-if game.PlaceId ~= ROOT_PLACE_ID then
-    warn("[init] Current PlaceId=" .. tostring(game.PlaceId) .. " != ROOT=" .. tostring(ROOT_PLACE_ID) .. ", teleporting to plaza")
-    task.wait(2)
-    TeleportService:Teleport(ROOT_PLACE_ID, LocalPlayer)
-    -- Script will restart after teleport, so stop here
-    return
-end
 
 -- ── QUEUE ON TELEPORT (auto re-execute after hop) ─────────────────────────────
 if queue_on_teleport then
@@ -708,12 +910,31 @@ elseif syn and syn.queue_on_teleport then
     end)
 end
 
-print("══════════════════════════════════════════")
-print("  Booth Scanner — Headless Mode")
-print("  Auto Scan: ON | Auto Hop: ON")
-print("  JobId: " .. game.JobId:sub(1, 12))
-print("══════════════════════════════════════════")
+-- ── AUTO TELEPORT TO PLAZA ────────────────────────────────────────────────────
+-- If we're in a sub-place (not the root plaza), teleport back to plaza
+if game.PlaceId ~= ROOT_PLACE_ID then
+    Library:Notify({ Title = "Wrong Place", Description = "Teleporting to Plaza...", Time = 5 })
+    warn("[init] Current PlaceId=" .. tostring(game.PlaceId) .. " != ROOT=" .. tostring(ROOT_PLACE_ID) .. ", teleporting to plaza")
+    task.wait(2)
+    TeleportService:Teleport(ROOT_PLACE_ID, LocalPlayer)
+    -- Script will restart after teleport, so stop here
+    return
+end
 
--- ── START AUTO SCAN (langsung aktif, tidak perlu GUI toggle) ──────────────────
-task.wait(3) -- tunggu game load
-startAutoScan()
+Library:Notify({ Title = "Booth Scanner", Description = "Loaded", Time = 3 })
+
+task.spawn(function()
+    task.wait(1) -- let Obsidian finish applying saved config
+
+    -- Sync runtime vars from saved toggle state
+    autoHopEnabled  = Toggles.AutoHop.Value
+    autoScanEnabled = Toggles.AutoScan.Value
+
+    print("[init] AutoScan=" .. tostring(autoScanEnabled) .. " AutoHop=" .. tostring(autoHopEnabled))
+    print("[init] VALUES_URL=" .. VALUES_URL)
+
+    if autoScanEnabled then
+        Library:Notify({ Title = "Auto Scan", Description = "Resuming from saved config", Time = 4 })
+        startAutoScan()
+    end
+end)
