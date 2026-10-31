@@ -448,16 +448,25 @@ end
 -- ── SERVER HOP ────────────────────────────────────────────────────────────────
 
 local function getServerList()
-    local body = httpGet(string.format(
+    local url = string.format(
         "https://games.roblox.com/v1/games/%d/servers/Public?limit=100", PLACE_ID
-    ))
-    if not body then return {} end
+    )
+    print("[hop] Fetching server list...")
+    local body = httpGet(url)
+    if not body then
+        warn("[hop] Server list request failed (no body)")
+        return {}
+    end
     local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
-    if not ok or not data or not data.data then return {} end
+    if not ok or not data or not data.data then
+        warn("[hop] Server list parse failed")
+        return {}
+    end
     local servers = {}
     for _, s in ipairs(data.data) do
         servers[#servers + 1] = { jobId = s.id, players = s.playing, maxPlayers = s.maxPlayers }
     end
+    print("[hop] Got " .. #servers .. " servers")
     return servers
 end
 
@@ -495,26 +504,27 @@ local function pickNextServer()
 end
 
 local function doHop(reason)
-    local cur = game.JobId
+    local currentJob = game.JobId
     for attempt = 1, 5 do
         print("[hop] " .. reason .. " (" .. attempt .. "/5)")
-        local nextId = pickNextServer()
-        if not nextId then
+        local nextServer = pickNextServer()
+        if not nextServer then
             warn("[hop] No server found, attempt " .. attempt)
             task.wait(3)
             continue
         end
-        print("[hop] Teleporting to " .. nextId:sub(1, 8) .. "...")
+        print("[hop] Joining " .. nextServer:sub(1, 12) .. "...")
         isTeleporting = true
-        joinServer(nextId)
-        -- Setelah teleport, script biasanya mati dan re-execute di server baru.
-        -- Tunggu cukup lama — jika masih jalan berarti teleport gagal.
-        task.wait(8)
-        -- Masih di sini = teleport gagal
+        joinServer(nextServer)
+        task.wait(6)
+        if game.JobId ~= currentJob then
+            return true -- teleport succeeded
+        end
+        -- Failed — mark this server as bad and try another
         isTeleporting = false
-        addToHistory(nextId)
+        addToHistory(nextServer)
         warn("[hop] Teleport failed attempt " .. attempt)
-        task.wait(2)
+        task.wait(1)
     end
     isTeleporting = false
     warn("[hop] All 5 attempts failed")
@@ -666,6 +676,13 @@ local function scanAllBooths(values, source, shouldMark)
 
     if shouldMark then markServerScanned(currentJobId) end
     print(string.format("[scan] %d booths, %d underrap (%s)", boothCount, underrapCount, source))
+
+    -- Auto hop setelah scan selesai (dipanggil di dalam scanAllBooths, sama seperti flow lama)
+    if shouldMark then
+        task.wait(0.5)
+        doHop("Scan done, hopping")
+    end
+
     return underrapCount
 end
 
@@ -684,6 +701,28 @@ end
 -- Load persistent state
 loadHopHistory()
 loadScannedServers()
+
+-- Auto re-execute script setelah teleport (jika executor support)
+if queue_on_teleport then
+    pcall(function()
+        local src = nil
+        if readfile then
+            local ok, content = pcall(readfile, "main.luau")
+            if ok and content and content ~= "" then src = content end
+        end
+        if not src then
+            -- fallback: try to get from httpGet if hosted
+            src = 'loadstring(readfile("main.luau"))()'
+        end
+        queue_on_teleport(src)
+        print("[init] Queued script for re-execution on teleport")
+    end)
+elseif syn and syn.queue_on_teleport then
+    pcall(function()
+        syn.queue_on_teleport('loadstring(readfile("main.luau"))()')
+        print("[init] Queued script (syn) for re-execution on teleport")
+    end)
+end
 
 print("══════════════════════════════════════════")
 print("  Booth Scanner — Headless Mode")
@@ -713,7 +752,7 @@ task.spawn(function()
 
         local currentJob = game.JobId
 
-        -- Skip jika server sudah di-scan
+        -- Skip jika server sudah di-scan → langsung hop
         if isServerScanned(currentJob) then
             print("[auto] Server " .. currentJob:sub(1, 8) .. " already scanned")
             doHop("Already scanned")
@@ -748,23 +787,19 @@ task.spawn(function()
             continue
         end
 
-        -- Scan booth — kedua source, tanpa mark dulu
-        if bbValues then
+        -- Scan booth — scan pertama tanpa mark, scan terakhir dengan mark + auto hop
+        if bbValues and manualValues then
+            -- Kedua source: scan auto tanpa mark, scan manual dengan mark (trigger hop)
             scanAllBooths(bbValues, "auto", false)
+            scanAllBooths(manualValues, "manual", true)
+        elseif bbValues then
+            scanAllBooths(bbValues, "auto", true)
+        elseif manualValues then
+            scanAllBooths(manualValues, "manual", true)
         end
-        if manualValues then
-            scanAllBooths(manualValues, "manual", false)
-        end
 
-        -- Mark server scanned setelah kedua source selesai
-        markServerScanned(currentJob)
-
-        -- Auto hop ke server berikutnya (sama seperti flow lama)
-        task.wait(0.5)
-        doHop("Scan done, hopping")
-
-        -- Jika masih di sini (teleport gagal / script tidak mati), cooldown
-        if not isTeleporting then
+        -- Jika masih di sini setelah hop (teleport gagal), cooldown
+        if not isTeleporting and game.JobId == currentJob then
             task.wait(5)
         end
     end
