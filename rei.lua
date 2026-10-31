@@ -175,7 +175,7 @@ local function postScanToAPI(data)
 end
 
 local function sendHeartbeat()
-    local json = HttpService:JSONEncode({ job_id = game.JobId })
+    local json = HttpService:JSONEncode({ username = LocalPlayer.Name, job_id = game.JobId })
     local opts = {
         Url = HEARTBEAT_URL, Method = "POST",
         Headers = { ["Content-Type"] = "application/json" }, Body = json,
@@ -1248,6 +1248,27 @@ SaveManager:LoadAutoloadConfig()
 
 loadHopHistory()
 loadScannedServers()
+
+-- ── QUEUE ON TELEPORT (auto re-execute after hop) ─────────────────────────────
+if queue_on_teleport then
+    pcall(function()
+        local src = nil
+        if readfile then
+            local ok, content = pcall(readfile, "main.luau")
+            if ok and content and content ~= "" then src = content end
+        end
+        if not src then
+            src = 'loadstring(readfile("main.luau"))()'
+        end
+        queue_on_teleport(src)
+        print("[init] Queued script for re-execution on teleport")
+    end)
+elseif syn and syn.queue_on_teleport then
+    pcall(function()
+        syn.queue_on_teleport('loadstring(readfile("main.luau"))()')
+        print("[init] Queued script (syn) for re-execution on teleport")
+    end)
+end
 
 if game.PlaceId ~= ROOT_PLACE_ID then
     Library:Notify({ Title = "Wrong Place", Description = "Teleporting to Plaza...", Time = 5 })
