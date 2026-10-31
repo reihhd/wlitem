@@ -14,7 +14,7 @@ local WEBHOOK_URL = "https://discord.com/api/webhooks/1510395545141907478/cN3zzP
 local VALUES_URL  = "http://hyper.ypnode.my.id:10750/values.json" -- server-hosted, no ngrok
 local SCANS_URL   = "http://hyper.ypnode.my.id:10750/scans"       -- POST scan results for dashboard
 local HEARTBEAT_URL = "http://hyper.ypnode.my.id:10750/heartbeat"
-local HOP_SKIP_COUNT  = 20
+local HOP_SKIP_COUNT  = 50
 local HOP_HISTORY_FILE = "hop_history.json"
 local SCANNED_SERVERS_FILE = "scanned_servers.json"
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -72,11 +72,11 @@ end
 
 local function markServerScanned(jobId)
     scannedServers[jobId] = os.time()
-    -- Clean old entries (older than 5 minutes)
+    -- Clean old entries (older than 30 minutes)
     local now = os.time()
     local cleaned = {}
     for id, t in pairs(scannedServers) do
-        if now - t < 300 then cleaned[id] = t end
+        if now - t < 1800 then cleaned[id] = t end
     end
     scannedServers = cleaned
     saveScannedServers()
@@ -467,7 +467,11 @@ local function getServerList()
 end
 
 local function joinServer(jobId)
-    addToHistory(game.JobId)
+    addToHistory(game.JobId)   -- remember current server
+    addToHistory(jobId)        -- remember target server too (avoid re-pick on fail)
+    markServerScanned(game.JobId) -- mark current as scanned before leaving
+    isTeleporting = true
+    print("[hop] Teleporting to " .. jobId:sub(1, 8))
     TeleportService:TeleportToPlaceInstance(PLACE_ID, jobId, LocalPlayer)
 end
 
@@ -502,31 +506,41 @@ local function pickNextServer()
     return nil
 end
 
--- Aggressive hop: try multiple servers quickly
+-- Hop to a different server. After TeleportToPlaceInstance the script dies;
+-- queue_on_teleport restarts it in the new server.
 local function doHop(reason)
-    local currentJob = game.JobId
-    for attempt = 1, 5 do
-        Library:Notify({ Title = "Auto Hop", Description = string.format("%s (%d/5)", reason, attempt), Time = 2 })
-        local nextServer = pickNextServer()
-        if not nextServer then
-            warn("[hop] No server found, attempt " .. attempt)
-            task.wait(3)
-            continue
-        end
-        isTeleporting = true
-        joinServer(nextServer)
-        task.wait(6)
-        if game.JobId ~= currentJob then
-            return true -- teleport succeeded
-        end
-        -- Failed — mark this server as bad and try another
-        isTeleporting = false
-        addToHistory(nextServer)
-        warn("[hop] Teleport failed attempt " .. attempt)
-        task.wait(1)
+    if isTeleporting then
+        print("[hop] Already teleporting, skip")
+        return true
     end
+
+    Library:Notify({ Title = "Auto Hop", Description = reason, Time = 3 })
+
+    local nextServer = pickNextServer()
+    if not nextServer then
+        -- No server found — reset history and try once more
+        warn("[hop] No server found, resetting history")
+        hopHistory = {}
+        saveHopHistory()
+        nextServer = pickNextServer()
+    end
+
+    if not nextServer then
+        Library:Notify({ Title = "Auto Hop", Description = "No servers available", Time = 5 })
+        return false
+    end
+
+    -- joinServer sets isTeleporting, marks current scanned, adds to history
+    joinServer(nextServer)
+
+    -- Wait for teleport to take effect (script will die on success)
+    -- If still alive after 15s, teleport failed
+    task.wait(15)
+
+    -- If we're still here, teleport failed
     isTeleporting = false
-    Library:Notify({ Title = "Auto Hop", Description = "All attempts failed", Time = 5 })
+    warn("[hop] Teleport failed to " .. nextServer:sub(1, 8))
+    Library:Notify({ Title = "Auto Hop", Description = "Teleport failed, will retry", Time = 5 })
     return false
 end
 
@@ -566,19 +580,26 @@ local function startAutoScan()
                 print("[auto] Server " .. currentJob:sub(1, 8) .. " already scanned")
                 if autoHopEnabled then
                     doHop("Already scanned")
-                    if game.JobId == currentJob then
-                        task.wait(10) -- all hops failed, cooldown
-                    end
+                    -- If still here, teleport failed — cooldown before retry
+                    task.wait(15)
                 else
                     task.wait(5)
                 end
                 continue
             end
 
-            local values = loadValues()
-            local manualValues = loadManualItems()
-            if next(values) or next(manualValues) then
-                scanAllBooths(values, manualValues)
+            -- Load manual values (merge /values.json + /items.json)
+            local manualValues = loadManualValues()
+            local manualItems = loadManualItems()
+            for k, v in pairs(manualItems) do
+                if not manualValues[k] then manualValues[k] = v end
+            end
+
+            -- Load auto values (BBValues.uk)
+            local autoValues = loadBBValues()
+
+            if next(manualValues) or next(autoValues) then
+                scanAllBooths(autoValues, manualValues)
             else
                 Library:Notify({ Title = "Auto Scan", Description = "Failed to load values, retry in 5s", Time = 3 })
                 task.wait(5)
@@ -831,8 +852,16 @@ MainGroup:AddButton({
         task.spawn(function()
             Library:Notify({ Title = "Refresh", Description = "Fetching values...", Time = 2 })
 
-            local autoVals = loadValues()
-            local manualVals = loadManualItems()
+            -- Force refresh BBValues cache
+            cachedBBValues = nil
+            lastBBFetchTime = 0
+
+            local autoVals = loadBBValues()
+            local manualVals = loadManualValues()
+            local manualItems = loadManualItems()
+            for k, v in pairs(manualItems) do
+                if not manualVals[k] then manualVals[k] = v end
+            end
 
             local autoCount = 0
             local manualCount = 0
@@ -861,13 +890,17 @@ MainGroup:AddDivider()
 MainGroup:AddButton({
     Text = "Scan All Booths",
     Func = function()
-        local values = loadValues()
-        local manualVals = loadManualItems()
-        if not next(values) and not next(manualVals) then
+        local manualVals = loadManualValues()
+        local manualItems = loadManualItems()
+        for k, v in pairs(manualItems) do
+            if not manualVals[k] then manualVals[k] = v end
+        end
+        local autoVals = loadBBValues()
+        if not next(autoVals) and not next(manualVals) then
             Library:Notify({ Title = "Error", Description = "Failed to load values", Time = 5 })
             return
         end
-        task.spawn(scanAllBooths, values, manualVals)
+        task.spawn(scanAllBooths, autoVals, manualVals)
     end,
     Tooltip = "Scan all booths and send webhook on underrap",
 })
