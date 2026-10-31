@@ -13,6 +13,7 @@ local ROOT_PLACE_ID = 16581637217
 local PLACE_ID      = ROOT_PLACE_ID
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1510395545141907478/cN3zzPCevXKBL4nEBefV7Z6m_ufHSUYjlBHKyPK8sZGl2VufTkamnNpxL58DWvF5z7hs"
 local SCANS_URL   = "http://hyper.ypnode.my.id:10750/scans"
+local HEARTBEAT_URL = "http://hyper.ypnode.my.id:10750/heartbeat"
 local VALUES_URL  = "http://hyper.ypnode.my.id:10750/values.json" -- manual values dari bot
 local MIN_VALUE      = 100 -- hanya scan item dengan value > ini
 local DEFAULT_UNDER  = 20  -- default under deduction
@@ -172,6 +173,26 @@ local function postScanToAPI(data)
     else pcall(function() HttpService:PostAsync(SCANS_URL, json) end)
     end
 end
+
+local function sendHeartbeat()
+    local json = HttpService:JSONEncode({ job_id = game.JobId })
+    local opts = {
+        Url = HEARTBEAT_URL, Method = "POST",
+        Headers = { ["Content-Type"] = "application/json" }, Body = json,
+    }
+    if request then pcall(request, opts)
+    elseif syn and syn.request then pcall(syn.request, opts)
+    else pcall(function() HttpService:PostAsync(HEARTBEAT_URL, json) end)
+    end
+end
+
+-- Heartbeat loop: send every 2 minutes
+task.spawn(function()
+    while true do
+        pcall(sendHeartbeat)
+        task.wait(120)
+    end
+end)
 
 -- ── BBVALUES.UK API ───────────────────────────────────────────────────────────
 -- Fetch langsung dari bbvalues.uk/api/items
