@@ -18,7 +18,7 @@ local SCANS_URL     = "http://hyper.ypnode.my.id:10750/scans"
 local HEARTBEAT_URL = "http://hyper.ypnode.my.id:10750/heartbeat"
 local VALUES_URL    = "http://hyper.ypnode.my.id:10750/values.json"
 local MIN_VALUE      = 100
-local DEFAULT_UNDER  = 10
+local DEFAULT_UNDER  = 20
 local HOP_SKIP_COUNT = 20
 local SCAN_MODE      = "both" -- "auto", "manual", "both"
 
@@ -500,16 +500,21 @@ local function doHop(reason)
         print("[hop] " .. reason .. " (" .. attempt .. "/5)")
         local nextId = pickNextServer()
         if not nextId then
+            warn("[hop] No server found, attempt " .. attempt)
             task.wait(3)
             continue
         end
+        print("[hop] Teleporting to " .. nextId:sub(1, 8) .. "...")
         isTeleporting = true
         joinServer(nextId)
-        task.wait(HOP_TELEPORT_WAIT)
-        if game.JobId ~= cur then return true end
+        -- Setelah teleport, script biasanya mati dan re-execute di server baru.
+        -- Tunggu cukup lama — jika masih jalan berarti teleport gagal.
+        task.wait(8)
+        -- Masih di sini = teleport gagal
         isTeleporting = false
         addToHistory(nextId)
-        task.wait(1)
+        warn("[hop] Teleport failed attempt " .. attempt)
+        task.wait(2)
     end
     isTeleporting = false
     warn("[hop] All 5 attempts failed")
@@ -524,6 +529,7 @@ local function scanAllBooths(values, source, shouldMark)
     if isTeleporting then return 0 end
 
     local currentJobId = game.JobId
+    if isServerScanned(currentJobId) then return 0 end
 
     local stands = workspace:FindFirstChild("Spawn")
         and workspace.Spawn:FindFirstChild("Hub")
@@ -693,31 +699,32 @@ task.spawn(function()
     end
 end)
 
--- Main scan + hop loop — langsung aktif
+-- Main auto-scan + auto-hop loop (sama seperti flow GUI lama)
 task.spawn(function()
     task.wait(3) -- tunggu game load
 
     while true do
+        -- Guard: jangan scan kalau lagi teleport
         if isTeleporting then
+            print("[auto] Teleporting, skipping scan")
             task.wait(2)
             continue
         end
 
         local currentJob = game.JobId
 
-        -- Skip jika sudah di-scan
+        -- Skip jika server sudah di-scan
         if isServerScanned(currentJob) then
-            print("[auto] " .. currentJob:sub(1, 8) .. " already scanned → hopping")
-            local hopped = doHop("Already scanned")
-            if not hopped then
-                -- Gagal hop — tunggu lalu coba lagi
-                warn("[auto] Hop failed, retrying in 15s...")
-                task.wait(15)
+            print("[auto] Server " .. currentJob:sub(1, 8) .. " already scanned")
+            doHop("Already scanned")
+            -- Jika masih di sini (hop gagal semua), cooldown
+            if game.JobId == currentJob then
+                task.wait(10)
             end
             continue
         end
 
-        -- Load values sekali saja untuk kedua source
+        -- Load values
         local bbValues, manualValues = nil, nil
 
         if SCAN_MODE == "auto" or SCAN_MODE == "both" then
@@ -731,36 +738,34 @@ task.spawn(function()
         if SCAN_MODE == "manual" or SCAN_MODE == "both" then
             manualValues = loadManualValues()
             if not manualValues or not next(manualValues) then
-                if SCAN_MODE == "manual" then
-                    warn("[scan] Failed to load manual values")
-                end
                 manualValues = nil
             end
         end
 
         if not bbValues and not manualValues then
-            warn("[scan] No values available, retrying in 5s...")
+            warn("[scan] No values available, retry in 5s...")
             task.wait(5)
             continue
         end
 
-        -- Scan — jangan mark server scanned dulu, biar kedua source bisa scan
+        -- Scan booth — kedua source, tanpa mark dulu
         if bbValues then
-            scanAllBooths(bbValues, "auto", false) -- false = jangan mark scanned
+            scanAllBooths(bbValues, "auto", false)
         end
         if manualValues then
             scanAllBooths(manualValues, "manual", false)
         end
 
-        -- Sekarang mark scanned
+        -- Mark server scanned setelah kedua source selesai
         markServerScanned(currentJob)
-        print("[scan] Server " .. currentJob:sub(1, 8) .. " fully scanned, hopping...")
 
-        -- Hop ke server berikutnya
-        local hopped = doHop("Scan done")
-        if not hopped then
-            warn("[auto] Hop failed after scan, retrying in 15s...")
-            task.wait(15)
+        -- Auto hop ke server berikutnya (sama seperti flow lama)
+        task.wait(0.5)
+        doHop("Scan done, hopping")
+
+        -- Jika masih di sini (teleport gagal / script tidak mati), cooldown
+        if not isTeleporting then
+            task.wait(5)
         end
     end
 end)
