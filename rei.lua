@@ -882,40 +882,41 @@ scanAllBooths = function(values, source)
                 if variantCount > 1 then
                     local cats = {}
                     for _, v in ipairs(variants) do
-                        local label = v.category .. (v.finisher and " ✨" or "")
+                        local label = v.category .. (v.finisher and " Finisher" or "")
                         if not table.find(cats, label) then table.insert(cats, label) end
                     end
-                    variantNote = string.format("\n⚠️ %d variants exist: %s\nMatched: **%s%s** (value %s)",
+                    variantNote = string.format("\n%d variants exist: %s\nMatched: **%s%s** (value %s)",
                         variantCount, table.concat(cats, ", "),
                         category, valueData.finisher and " Finisher" or "",
                         tostring(realValue))
                 end
+                local itemImage = string.format("https://bbvalues.uk/images/items/%s.webp", valueData.itemId or "")
                 sendWebhook({
                     embeds = {{
-                        title = "🎯 UNDERRAP FOUND (" .. sourceLabel .. ")",
+                        title = "Underrap Found",
                         description = string.format("**%s** selling **%d%%** below value!%s", item.name, pctOff, variantNote),
                         color = 0x00FF88,
+                        thumbnail = { url = itemImage },
                         fields = {
-                            { name = "📦 Item",       value = item.name,                                    inline = true },
-                            { name = "💰 Price",      value = string.format("`%s`", tostring(item.price)),  inline = true },
-                            { name = "💎 Value",      value = string.format("`%s`", tostring(realValue)),   inline = true },
-                            { name = "🏷️ Rarity",    value = rarity,                                       inline = true },
-                            { name = "📈 Profit",     value = string.format("`+%s`", tostring(profit)),     inline = true },
-                            { name = "🏷️ Category",  value = category .. (variantCount > 1 and string.format(" (%d variants)", variantCount) or ""), inline = true },
-                            { name = "⚔️ Finisher",  value = item.finisher and "✨ Yes" or "No",           inline = true },
-                            { name = "📊 Status",     value = valueData.status,                             inline = true },
-                            { name = "👤 Seller",    value = string.format("[%s](https://www.roblox.com/users/%s/profile)", username, tostring(ownerId)), inline = true },
-                            { name = "🔗 Join Server", value = string.format("[Click to Join](%s)", joinLink), inline = true },
-                            { name = "📋 Join Script", value = string.format(
+                            { name = "Item",       value = item.name,                                    inline = true },
+                            { name = "Price",      value = string.format("`%s`", tostring(item.price)),  inline = true },
+                            { name = "Value",      value = string.format("`%s`", tostring(realValue)),   inline = true },
+                            { name = "Rarity",     value = rarity,                                       inline = true },
+                            { name = "Profit",     value = string.format("`+%s`", tostring(profit)),     inline = true },
+                            { name = "Category",   value = category .. (variantCount > 1 and string.format(" (%d variants)", variantCount) or ""), inline = true },
+                            { name = "Finisher",   value = item.finisher and "Yes" or "No",              inline = true },
+                            { name = "Status",     value = valueData.status,                             inline = true },
+                            { name = "Seller",     value = string.format("[%s](https://www.roblox.com/users/%s/profile)", username, tostring(ownerId)), inline = true },
+                            { name = "Join Server", value = string.format("[Click to Join](%s)", joinLink), inline = true },
+                            { name = "Join Script", value = string.format(
                                 "```lua\ngame:GetService(\"TeleportService\"):TeleportToPlaceInstance(%s, \"%s\", game.Players.LocalPlayer)\n```",
                                 tostring(PLACE_ID), currentJobId
                             ), inline = false },
-                            { name = "🌐 Join (Tanpa Executor)", value = string.format(
-                                "Copy lalu paste ke address bar browser:\n```\n%s\n```", deepLink
+                            { name = "Join (Without Executor)", value = string.format(
+                                "Copy and paste into browser address bar:\n```\n%s\n```", deepLink
                             ), inline = false },
-                            { name = "🆔 Job ID", value = string.format("`%s`", currentJobId), inline = false },
                         },
-                        footer = { text = sourceLabel .. " Scanner · " .. currentJobId },
+                        footer = { text = "imaginemeandyou | by rei" },
                         timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
                     }},
                 })
