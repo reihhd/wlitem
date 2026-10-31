@@ -18,7 +18,7 @@ local SCANS_URL     = "http://hyper.ypnode.my.id:10750/scans"
 local HEARTBEAT_URL = "http://hyper.ypnode.my.id:10750/heartbeat"
 local VALUES_URL    = "http://hyper.ypnode.my.id:10750/values.json"
 local MIN_VALUE      = 100
-local DEFAULT_UNDER  = 20
+local DEFAULT_UNDER  = 10
 local HOP_SKIP_COUNT = 20
 local SCAN_MODE      = "both" -- "auto", "manual", "both"
 
