@@ -1,81 +1,48 @@
 -- main.luau
--- Blade Ball Booth Scanner — Headless (No GUI)
--- Dual Source: Manual (Bot) + Auto (BBValues)
--- Auto Scan + Auto Hop — langsung aktif
+-- Blade Ball Booth Scanner + Auto Server Hop
+-- Headless (No GUI) — stripped from working GUI version
 -- Made by Rei
 
 local Players         = game:GetService("Players")
 local LocalPlayer     = Players.LocalPlayer
 local HttpService     = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
-local RunService      = game:GetService("RunService")
 
 -- ── CONFIG ────────────────────────────────────────────────────────────────────
-local ROOT_PLACE_ID = 16581637217
-local PLACE_ID      = ROOT_PLACE_ID
-local WEBHOOK_URL   = "https://discord.com/api/webhooks/1510395545141907478/cN3zzPCevXKBL4nEBefV7Z6m_ufHSUYjlBHKyPK8sZGl2VufTkamnNpxL58DWvF5z7hs"
-local SCANS_URL     = "http://hyper.ypnode.my.id:10750/scans"
+local ROOT_PLACE_ID = 16581637217 -- Blade Ball plaza (root place)
+local PLACE_ID      = ROOT_PLACE_ID -- always use root for server list & teleport
+local WEBHOOK_URL = "https://discord.com/api/webhooks/1510395545141907478/cN3zzPCevXKBL4nEBefV7Z6m_ufHSUYjlBHKyPK8sZGl2VufTkamnNpxL58DWvF5z7hs"
+local VALUES_URL  = "http://hyper.ypnode.my.id:10750/values.json" -- server-hosted, no ngrok
+local SCANS_URL   = "http://hyper.ypnode.my.id:10750/scans"       -- POST scan results for dashboard
 local HEARTBEAT_URL = "http://hyper.ypnode.my.id:10750/heartbeat"
-local VALUES_URL    = "http://hyper.ypnode.my.id:10750/values.json"
-local MIN_VALUE      = 100
-local DEFAULT_UNDER  = 20
-local HOP_SKIP_COUNT = 20
-local SCAN_MODE      = "both" -- "auto", "manual", "both"
-
--- File persistence
-local HOP_HISTORY_FILE     = "hop_history.json"
+local HOP_SKIP_COUNT  = 20
+local HOP_HISTORY_FILE = "hop_history.json"
 local SCANNED_SERVERS_FILE = "scanned_servers.json"
-local BBVALUES_CACHE_FILE  = "bbvalues_cache.json"
-
--- Tuning — scan secepat mungkin
-local BOOTH_WAIT       = 0     -- tanpa delay setelah fire prompt
-local SCAN_COOLDOWN    = 0     -- langsung hop setelah scan selesai
-local HOP_TELEPORT_WAIT = 5    -- wait setelah teleport attempt
-local HEARTBEAT_INTERVAL = 120 -- kirim heartbeat tiap 2 menit
-local CACHE_TTL          = 300 -- bbvalues cache 5 menit
-local SCANNED_EXPIRE     = 300 -- server dianggap "sudah scan" selama 5 menit
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- ── STATE ─────────────────────────────────────────────────────────────────────
 local hopHistory = {}
-local scannedServers = {}
-local isTeleporting = false
-
--- BBValues cache
-local cachedBBValues = nil
-local lastFetchTime  = 0
-
--- Player info cache (avoid repeated API calls)
-local usernameCache = {}
-
--- ── UTILITY: FILE I/O ────────────────────────────────────────────────────────
-
-local function readJsonFile(file)
-    if not readfile then return nil end
-    local ok, content = pcall(readfile, file)
-    if not ok or not content or content == "" then return nil end
-    local ok2, data = pcall(function() return HttpService:JSONDecode(content) end)
-    return ok2 and type(data) == "table" and data or nil
-end
-
-local function writeJsonFile(file, data)
-    if writefile then
-        pcall(writefile, file, HttpService:JSONEncode(data))
-    end
-end
-
--- ── HOP HISTORY ───────────────────────────────────────────────────────────────
+local scannedServers = {} -- track which servers have been scanned
+local isTeleporting = false -- guard against duplicate scans during teleport
 
 local function loadHopHistory()
-    hopHistory = readJsonFile(HOP_HISTORY_FILE) or {}
+    if readfile then
+        local ok, content = pcall(readfile, HOP_HISTORY_FILE)
+        if ok and content ~= "" then
+            local ok2, data = pcall(function() return HttpService:JSONDecode(content) end)
+            if ok2 and type(data) == "table" then hopHistory = data return end
+        end
+    end
+    hopHistory = {}
 end
 
 local function saveHopHistory()
-    writeJsonFile(HOP_HISTORY_FILE, hopHistory)
+    if writefile then
+        pcall(writefile, HOP_HISTORY_FILE, HttpService:JSONEncode(hopHistory))
+    end
 end
 
 local function addToHistory(jobId)
-    hopHistory[#hopHistory + 1] = jobId
+    table.insert(hopHistory, jobId)
     while #hopHistory > HOP_SKIP_COUNT do table.remove(hopHistory, 1) end
     saveHopHistory()
 end
@@ -87,346 +54,251 @@ local function isInHistory(jobId)
     return false
 end
 
--- ── SCANNED SERVERS ───────────────────────────────────────────────────────────
-
 local function loadScannedServers()
-    scannedServers = readJsonFile(SCANNED_SERVERS_FILE) or {}
+    if readfile then
+        local ok, content = pcall(readfile, SCANNED_SERVERS_FILE)
+        if ok and content ~= "" then
+            local ok2, data = pcall(function() return HttpService:JSONDecode(content) end)
+            if ok2 and type(data) == "table" then scannedServers = data return end
+        end
+    end
+    scannedServers = {}
 end
 
 local function saveScannedServers()
-    writeJsonFile(SCANNED_SERVERS_FILE, scannedServers)
+    if writefile then
+        pcall(writefile, SCANNED_SERVERS_FILE, HttpService:JSONEncode(scannedServers))
+    end
 end
 
 local function markServerScanned(jobId)
+    scannedServers[jobId] = os.time()
+    -- Clean old entries (older than 5 minutes)
     local now = os.time()
-    scannedServers[jobId] = now
     local cleaned = {}
     for id, t in pairs(scannedServers) do
-        if now - t < SCANNED_EXPIRE then cleaned[id] = t end
+        if now - t < 300 then cleaned[id] = t end
     end
     scannedServers = cleaned
     saveScannedServers()
 end
 
 local function isServerScanned(jobId)
-    local t = scannedServers[jobId]
-    if not t then return false end
-    if os.time() - t >= SCANNED_EXPIRE then
-        scannedServers[jobId] = nil
-        return false
-    end
-    return true
+    return scannedServers[jobId] ~= nil
 end
 
--- ── HTTP ──────────────────────────────────────────────────────────────────────
+-- ── UTILITY ───────────────────────────────────────────────────────────────────
 
-local function httpRequest(url, method, body, extraHeaders)
+local function httpGet(url)
     local headers = {
         ["User-Agent"] = "Mozilla/5.0",
         ["Accept"] = "application/json",
+        ["ngrok-skip-browser-warning"] = "true",
     }
-    if extraHeaders then
-        for k, v in pairs(extraHeaders) do headers[k] = v end
-    end
-    if body then
-        headers["Content-Type"] = "application/json"
-    end
-    local opts = { Url = url, Method = method or "GET", Headers = headers, Body = body }
     if request then
-        local ok, res = pcall(request, opts)
-        if ok and res then return res.Body end
+        local ok, res = pcall(request, { Url = url, Method = "GET", Headers = headers })
+        if ok and res and res.Body and res.Body ~= "" then return res.Body end
     end
     if syn and syn.request then
-        local ok, res = pcall(syn.request, opts)
-        if ok and res then return res.Body end
+        local ok, res = pcall(syn.request, { Url = url, Method = "GET", Headers = headers })
+        if ok and res and res.Body and res.Body ~= "" then return res.Body end
     end
-    -- Fallback HttpService
-    if method == "GET" or not method then
-        local ok, res = pcall(function() return HttpService:GetAsync(url) end)
-        return ok and res or nil
-    else
-        local ok, res = pcall(function() return HttpService:PostAsync(url, body or "") end)
-        return ok and res or nil
-    end
-end
-
-local function httpGet(url, extraHeaders)
-    return httpRequest(url, "GET", nil, extraHeaders)
-end
-
-local function httpPost(url, data)
-    httpRequest(url, "POST", HttpService:JSONEncode(data))
-end
-
--- ── API CALLS (fire-and-forget via task.spawn) ────────────────────────────────
-
-local function sendWebhook(payload)
-    pcall(httpPost, WEBHOOK_URL, payload)
-end
-
-local function postScanToAPI(data)
-    pcall(httpPost, SCANS_URL, data)
-end
-
-local function sendHeartbeat()
-    pcall(httpPost, HEARTBEAT_URL, {
-        username = LocalPlayer.Name,
-        job_id   = game.JobId,
-    })
-end
-
--- ── PLAYER INFO (cached) ─────────────────────────────────────────────────────
-
-local function getUsername(userId)
-    if usernameCache[userId] then return usernameCache[userId] end
-    local ok, name = pcall(function() return Players:GetNameFromUserIdAsync(userId) end)
-    local result = ok and name or tostring(userId)
-    usernameCache[userId] = result
-    return result
-end
-
-local function getDisplayName(userId)
-    local player = Players:GetPlayerByUserId(userId)
-    return player and player.DisplayName or nil
+    local ok, body = pcall(function() return HttpService:GetAsync(url) end)
+    return ok and body or nil
 end
 
 local function parseNumber(str)
     if not str then return nil end
-    return tonumber(tostring(str):gsub(",", ""):gsub("%s+", ""))
+    local clean = tostring(str):gsub(",", ""):gsub("%s+", "")
+    return tonumber(clean)
 end
 
--- ── BBVALUES.UK API ───────────────────────────────────────────────────────────
+local function getUsername(userId)
+    local ok, name = pcall(function() return Players:GetNameFromUserIdAsync(userId) end)
+    return ok and name or tostring(userId)
+end
 
-local function parseBBValuesBody(body)
-    if not body or body == "" or body:sub(1, 1) ~= "[" then return nil end
+local function getDisplayName(userId)
+    local ok, info = pcall(function()
+        local player = Players:GetPlayerByUserId(userId)
+        if player then return player.DisplayName end
+        -- fallback: use username
+        return nil
+    end)
+    return ok and info or nil
+end
+
+local function sendWebhook(payload)
+    local json = HttpService:JSONEncode(payload)
+    local opts = {
+        Url = WEBHOOK_URL, Method = "POST",
+        Headers = { ["Content-Type"] = "application/json" }, Body = json,
+    }
+    if request then pcall(request, opts)
+    elseif syn and syn.request then pcall(syn.request, opts)
+    else pcall(function() HttpService:PostAsync(WEBHOOK_URL, json) end)
+    end
+end
+
+local function postScanToAPI(data)
+    local json = HttpService:JSONEncode(data)
+    local opts = {
+        Url = SCANS_URL, Method = "POST",
+        Headers = { ["Content-Type"] = "application/json" }, Body = json,
+    }
+    if request then pcall(request, opts)
+    elseif syn and syn.request then pcall(syn.request, opts)
+    else pcall(function() HttpService:PostAsync(SCANS_URL, json) end)
+    end
+end
+
+local function sendHeartbeat()
+    local json = HttpService:JSONEncode({
+        username = LocalPlayer.Name,
+        job_id   = game.JobId,
+    })
+    local opts = {
+        Url = HEARTBEAT_URL, Method = "POST",
+        Headers = { ["Content-Type"] = "application/json" }, Body = json,
+    }
+    if request then pcall(request, opts)
+    elseif syn and syn.request then pcall(syn.request, opts)
+    else pcall(function() HttpService:PostAsync(HEARTBEAT_URL, json) end)
+    end
+end
+
+-- Heartbeat loop: send every 2 minutes
+task.spawn(function()
+    while true do
+        pcall(sendHeartbeat)
+        task.wait(120)
+    end
+end)
+
+-- ── VALUES ────────────────────────────────────────────────────────────────────
+
+local MANUAL_URL = "http://hyper.ypnode.my.id:10750/items.json"
+
+local function loadValues()
+    print("[values] Fetching: " .. VALUES_URL)
+    local body = httpGet(VALUES_URL)
+    if not body then
+        warn("[values] httpGet returned nil")
+        return {}
+    end
+    -- Guard: ngrok returned HTML instead of JSON
+    if body:sub(1, 1) ~= "{" and body:sub(1, 1) ~= "[" then
+        warn("[values] Response is not JSON (got HTML?): " .. body:sub(1, 100))
+        return {}
+    end
     local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
-    return (ok and type(data) == "table") and data or nil
-end
-
-local function buildValuesLookup(data)
-    local values = {}
-    local count = 0
-    for _, item in ipairs(data) do
-        local name, value = item.n, item.p
-        if name and value and value > MIN_VALUE then
-            local key = string.lower(name)
-            local entry = {
-                value    = value,
-                category = item.c or "unknown",
-                rarity   = item.r or "NORMAL",
-                status   = item.st or "stable",
-                finisher = (item.s == "Finisher"),
-                source   = item.s or "None",
-            }
-            if not values[key] then
-                values[key] = { entry }
-            else
-                values[key][#values[key] + 1] = entry
-            end
-            count += 1
-        end
+    if not ok then
+        warn("[values] JSONDecode failed: " .. tostring(data))
+        return {}
     end
-    print("[bbvalues] " .. count .. " items loaded")
-    return values, count
-end
-
-local function loadBBValues()
-    -- 1. In-memory cache fresh
-    if cachedBBValues and (os.time() - lastFetchTime) < CACHE_TTL then
-        return cachedBBValues
+    if not data or not data.items then
+        warn("[values] No 'items' field")
+        return {}
     end
-
-    -- 2. Fetch dari API (retry 3x)
-    for attempt = 1, 3 do
-        local body = httpGet("https://bbvalues.uk/api/items", {
-            ["x-bbv-handshake"] = "v1-secure-request",
-            ["Referer"] = "https://bbvalues.uk/values/",
-        })
-        local data = parseBBValuesBody(body)
-        if data and #data > 100 then
-            if writefile then pcall(writefile, BBVALUES_CACHE_FILE, body) end
-            local values, count = buildValuesLookup(data)
-            if count > 0 then
-                cachedBBValues = values
-                lastFetchTime = os.time()
-                return values
-            end
-        end
-        if attempt < 3 then task.wait(attempt * 3) end
-    end
-
-    -- 3. Expired in-memory cache
-    if cachedBBValues then
-        warn("[bbvalues] API failed, using expired cache")
-        return cachedBBValues
-    end
-
-    -- 4. File cache
-    if readfile then
-        local ok, content = pcall(readfile, BBVALUES_CACHE_FILE)
-        if ok and content then
-            local fileData = parseBBValuesBody(content)
-            if fileData and #fileData > 100 then
-                local values, count = buildValuesLookup(fileData)
-                if count > 0 then
-                    cachedBBValues = values
-                    lastFetchTime = os.time() - CACHE_TTL + 60
-                    warn("[bbvalues] Using file cache")
-                    return values
-                end
-            end
-        end
-    end
-
-    warn("[bbvalues] All attempts failed")
-    return {}
-end
-
--- ── MANUAL VALUES (dari Bot) ──────────────────────────────────────────────────
-
-local function loadManualValues()
-    local body = httpGet(VALUES_URL, {})
-    if not body or body:sub(1, 1) ~= "{" then return {} end
-    local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
-    if not ok or not data or not data.items then return {} end
-
-    local values = {}
+    local normalized = {}
     local count = 0
     for k, v in pairs(data.items) do
-        if (not v.disabled or v.disabled == 0) and v.value and v.value > MIN_VALUE then
+        if not v.disabled then
+            -- Keys from /values.json may be "Name" or "Name|fin"
             local rawName = v.name or k:gsub("|fin$", "")
-            local fin = v.finisher == true or v.finisher == 1
-            local key = string.lower(rawName)
-            local underThreshold = v.under or 0
-            if underThreshold == 0 then underThreshold = v.value - DEFAULT_UNDER end
-            local entry = {
-                value          = v.value,
-                category       = v.category or "sword",
-                rarity         = "MANUAL",
-                status         = "manual",
-                finisher       = fin,
-                source         = "manual",
-                underThreshold = underThreshold,
+            local fin = v.finisher and true or false
+            local nkey = string.lower(rawName) .. (fin and "|1" or "|0")
+            normalized[nkey] = {
+                value    = v.value,
+                under    = v.under or 0,
+                category = v.category or "unknown",
+                finisher = fin,
+                source   = "manual",
             }
-            if not values[key] then
-                values[key] = { entry }
-            else
-                values[key][#values[key] + 1] = entry
-            end
             count += 1
         end
     end
-    print("[manual] " .. count .. " items loaded")
-    return values, count
+    print("[values] Loaded " .. count .. " items")
+    return normalized
 end
 
--- ── SMART VARIANT MATCHING ────────────────────────────────────────────────────
-
-local function analyzeItem(variants, hasFinisher, sellPrice)
-    if not sellPrice then return nil, false end
-
-    local finMatch, finOther = {}, {}
-    for _, v in ipairs(variants) do
-        if v.finisher == hasFinisher then
-            finMatch[#finMatch + 1] = v
-        else
-            finOther[#finOther + 1] = v
+-- Load manual items from /items.json (new CRUD endpoint)
+local function loadManualItems()
+    print("[manual] Fetching: " .. MANUAL_URL)
+    local body = httpGet(MANUAL_URL)
+    if not body then
+        warn("[manual] httpGet returned nil")
+        return {}
+    end
+    if body:sub(1, 1) ~= "{" then
+        warn("[manual] Response is not JSON")
+        return {}
+    end
+    local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+    if not ok then
+        warn("[manual] JSONDecode failed: " .. tostring(data))
+        return {}
+    end
+    if not data or not data.items then
+        warn("[manual] No 'items' field")
+        return {}
+    end
+    local normalized = {}
+    local count = 0
+    for _, item in ipairs(data.items) do
+        if not item.disabled and item.name and item.value then
+            local fin = item.finisher and true or false
+            local key = string.lower(item.name) .. (fin and "|1" or "|0")
+            normalized[key] = {
+                value    = item.value,
+                under    = item.under or 0,
+                category = item.category or "unknown",
+                finisher = fin,
+                source   = "manual",
+            }
+            count += 1
         end
     end
-
-    local pool = #finMatch > 0 and finMatch or variants
-
-    -- Single variant
-    if #pool == 1 then
-        local v = pool[1]
-        local isUnder = sellPrice <= (v.value - DEFAULT_UNDER)
-        if isUnder then
-            for _, other in ipairs(finOther) do
-                if sellPrice >= (other.value - DEFAULT_UNDER) and sellPrice <= (other.value * 1.5) then
-                    return other, false
-                end
-            end
-        end
-        return v, isUnder
-    end
-
-    -- Multiple variants — count categories
-    local catSet = {}
-    for _, v in ipairs(pool) do catSet[v.category or "unknown"] = true end
-    local catCount = 0
-    for _ in pairs(catSet) do catCount += 1 end
-
-    -- Find closest variant by score
-    local closest, bestScore = nil, math.huge
-    local allVariants = {}
-    for _, v in ipairs(pool) do allVariants[#allVariants + 1] = v end
-    for _, v in ipairs(finOther) do allVariants[#allVariants + 1] = v end
-
-    for _, v in ipairs(allVariants) do
-        local diff = math.abs(v.value - sellPrice)
-        local score = catCount > 1 and (diff / math.max(v.value, 1)) or diff
-        if score < bestScore then
-            bestScore = score
-            closest = v
-        end
-    end
-
-    -- Price in reasonable range of closest
-    if closest and sellPrice >= (closest.value - DEFAULT_UNDER) and sellPrice <= (closest.value * 1.5) then
-        return closest, false
-    end
-
-    -- Check underrap against cheapest in pool
-    local cheapest = pool[1]
-    for i = 2, #pool do
-        if pool[i].value < cheapest.value then cheapest = pool[i] end
-    end
-
-    local isUnder = sellPrice <= (cheapest.value - DEFAULT_UNDER)
-    if isUnder then
-        local rangeMul = catCount > 1 and 0.6 or 0.5
-        for _, v in ipairs(variants) do
-            if sellPrice >= (v.value * rangeMul) and sellPrice <= (v.value * 1.5) then
-                return v, false
-            end
-        end
-    end
-
-    return cheapest, isUnder
+    print("[manual] Loaded " .. count .. " manual items")
+    return normalized
 end
 
--- ── BOOTH SCANNING ────────────────────────────────────────────────────────────
+-- ── BOOTH SCAN ────────────────────────────────────────────────────────────────
 
 local function firePrompt(prompt)
-    if typeof(prompt) ~= "Instance" or not prompt:IsA("ProximityPrompt") then return end
+    if typeof(prompt) ~= "Instance" or not prompt:IsA("ProximityPrompt") then return false end
     if fireproximityprompt then
         fireproximityprompt(prompt)
-        return
+        return true
     end
-    pcall(function()
+    local ok = pcall(function()
         prompt:InputHoldBegin()
-        task.wait(0.02)
+        task.wait(0.05)
         prompt:InputHoldEnd()
     end)
+    return ok
 end
 
-local function scanCurrentBooth()
+local function getScrollingList()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     if not pg then return nil end
     local booth = pg:FindFirstChild("Booth")
     if not booth then return nil end
     local pb = booth:FindFirstChild("PlayersBooth")
     if not pb then return nil end
-    local list = pb:FindFirstChild("ScrollingList")
-    if not list then return nil end
+    return pb:FindFirstChild("ScrollingList")
+end
 
+local function scanCurrentBooth()
+    local list = getScrollingList()
+    if not list then return {} end
     local items = {}
     for _, entry in ipairs(list:GetChildren()) do
         local itemName, amount, hasFinisher = "", "", false
         local frame = entry:FindFirstChild("Frame")
         if frame then
             local nl = frame:FindFirstChild("ItemName")
-            if nl then itemName = nl.Text or "" end
+            if nl and (nl:IsA("TextLabel") or nl:IsA("TextBox")) then itemName = nl.Text end
             local fin = frame:FindFirstChild("Finisher")
             if fin and fin:IsA("GuiObject") then hasFinisher = fin.Visible end
         end
@@ -435,11 +307,11 @@ local function scanCurrentBooth()
             local li = bb:FindFirstChild("List")
             if li then
                 local al = li:FindFirstChild("Amount")
-                if al then amount = al.Text or "" end
+                if al and (al:IsA("TextLabel") or al:IsA("TextBox")) then amount = al.Text end
             end
         end
         if itemName ~= "" then
-            items[#items + 1] = { name = itemName, price = amount, finisher = hasFinisher }
+            table.insert(items, { name = itemName, price = amount, finisher = hasFinisher })
         end
     end
     return items
@@ -451,22 +323,14 @@ local function getServerList()
     local url = string.format(
         "https://games.roblox.com/v1/games/%d/servers/Public?limit=100", PLACE_ID
     )
-    print("[hop] Fetching server list...")
     local body = httpGet(url)
-    if not body then
-        warn("[hop] Server list request failed (no body)")
-        return {}
-    end
+    if not body then return {} end
     local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
-    if not ok or not data or not data.data then
-        warn("[hop] Server list parse failed")
-        return {}
-    end
+    if not ok or not data or not data.data then return {} end
     local servers = {}
     for _, s in ipairs(data.data) do
-        servers[#servers + 1] = { jobId = s.id, players = s.playing, maxPlayers = s.maxPlayers }
+        table.insert(servers, { jobId = s.id, players = s.playing, maxPlayers = s.maxPlayers })
     end
-    print("[hop] Got " .. #servers .. " servers")
     return servers
 end
 
@@ -478,42 +342,45 @@ end
 local function pickNextServer()
     local servers = getServerList()
     if #servers == 0 then return nil end
-    -- Shuffle
+    -- shuffle
     for i = #servers, 2, -1 do
         local j = math.random(i)
         servers[i], servers[j] = servers[j], servers[i]
     end
-    local cur = game.JobId
+    local currentJob = game.JobId
+    -- First pass: skip current, history, and already-scanned servers
     for _, s in ipairs(servers) do
-        if s.jobId ~= cur and not isInHistory(s.jobId) and not isServerScanned(s.jobId) then
+        if s.jobId ~= currentJob and not isInHistory(s.jobId) and not isServerScanned(s.jobId) then
             return s.jobId
         end
     end
+    -- Second pass: allow already-scanned but not in history
     for _, s in ipairs(servers) do
-        if s.jobId ~= cur and not isInHistory(s.jobId) then
+        if s.jobId ~= currentJob and not isInHistory(s.jobId) then
             return s.jobId
         end
     end
-    -- Reset history
+    -- All in history — reset
+    warn("[hop] All servers in history, resetting")
     hopHistory = {}
     saveHopHistory()
     for _, s in ipairs(servers) do
-        if s.jobId ~= cur then return s.jobId end
+        if s.jobId ~= currentJob then return s.jobId end
     end
     return nil
 end
 
+-- Aggressive hop: try multiple servers quickly
 local function doHop(reason)
     local currentJob = game.JobId
     for attempt = 1, 5 do
-        print("[hop] " .. reason .. " (" .. attempt .. "/5)")
+        print(string.format("[hop] %s (%d/5)", reason, attempt))
         local nextServer = pickNextServer()
         if not nextServer then
             warn("[hop] No server found, attempt " .. attempt)
             task.wait(3)
             continue
         end
-        print("[hop] Joining " .. nextServer:sub(1, 12) .. "...")
         isTeleporting = true
         joinServer(nextServer)
         task.wait(6)
@@ -533,22 +400,90 @@ end
 
 -- ── SCAN ALL BOOTHS ───────────────────────────────────────────────────────────
 
-local function scanAllBooths(values, source, shouldMark)
-    source = source or "auto"
-    if shouldMark == nil then shouldMark = true end
-    if isTeleporting then return 0 end
+local autoHopEnabled  = true   -- hardcoded ON (was GUI toggle)
+local autoScanEnabled = true   -- hardcoded ON (was GUI toggle)
+local autoScanThread  = nil
+
+local function stopAutoScan()
+    if autoScanThread then
+        task.cancel(autoScanThread)
+        autoScanThread = nil
+    end
+end
+
+-- forward declare — assigned BEFORE startAutoScan is ever called
+local scanAllBooths = nil
+
+local function startAutoScan()
+    stopAutoScan()
+    autoScanThread = task.spawn(function()
+        -- wait until scanAllBooths is assigned (it's defined later in the file)
+        while scanAllBooths == nil do task.wait(0.1) end
+        while autoScanEnabled do
+            -- Guard: don't scan if we're teleporting
+            if isTeleporting then
+                print("[auto] Teleporting, skipping scan")
+                task.wait(2)
+                continue
+            end
+
+            local currentJob = game.JobId
+
+            -- Skip if this server was already scanned
+            if isServerScanned(currentJob) then
+                print("[auto] Server " .. currentJob:sub(1, 8) .. " already scanned")
+                if autoHopEnabled then
+                    doHop("Already scanned")
+                    if game.JobId == currentJob then
+                        task.wait(10) -- all hops failed, cooldown
+                    end
+                else
+                    task.wait(5)
+                end
+                continue
+            end
+
+            local values = loadValues()
+            local manualValues = loadManualItems()
+            if next(values) or next(manualValues) then
+                scanAllBooths(values, manualValues)
+            else
+                print("[auto] Failed to load values, retry in 5s")
+                task.wait(5)
+            end
+            if autoScanEnabled and not autoHopEnabled then
+                task.wait(2)
+            end
+        end
+    end)
+end
+
+scanAllBooths = function(values, manualValues)
+    manualValues = manualValues or {}
+    -- Guard: don't scan if teleporting
+    if isTeleporting then
+        print("[scanner] Skipping scan — teleporting")
+        return
+    end
 
     local currentJobId = game.JobId
-    if isServerScanned(currentJobId) then return 0 end
+
+    -- Guard: don't scan same server twice
+    if isServerScanned(currentJobId) then
+        print("[scanner] Server " .. currentJobId:sub(1, 8) .. " already scanned, skipping")
+        return
+    end
 
     local stands = workspace:FindFirstChild("Spawn")
         and workspace.Spawn:FindFirstChild("Hub")
         and workspace.Spawn.Hub:FindFirstChild("Stands")
+
     if not stands then
         warn("[scanner] Stands not found")
-        return 0
+        return
     end
 
+    local results = {}
     local boothCount, underrapCount = 0, 0
     local joinLink = string.format(
         "https://www.roblox.com/games/start?placeId=%s&gameInstanceId=%s",
@@ -560,149 +495,199 @@ local function scanAllBooths(values, source, shouldMark)
     )
 
     for _, booth in ipairs(stands:GetChildren()) do
-        if isTeleporting then break end
         local ownerId = booth:GetAttribute("Owner")
         if ownerId == nil then continue end
         boothCount += 1
 
-        -- Fire proximity prompt
+        local prompt = nil
         local root = booth:FindFirstChild("Root")
         if root then
             local holder = root:FindFirstChild("ProximityPromptHolder")
-            if holder then
-                local prompt = holder:FindFirstChild("BoothProximityPrompt")
-                if prompt then
-                    firePrompt(prompt)
-                    if BOOTH_WAIT > 0 then task.wait(BOOTH_WAIT) end
-                end
-            end
+            if holder then prompt = holder:FindFirstChild("BoothProximityPrompt") end
         end
+        if prompt then firePrompt(prompt) task.wait(0.1) end
 
-        local items = scanCurrentBooth()
-        if not items then continue end
+        local items    = scanCurrentBooth()
         local username = getUsername(ownerId)
 
+        table.insert(results, string.format("=== Booth: %s (%s) ===", username, tostring(ownerId)))
+
         for _, item in ipairs(items) do
-            local key = string.lower(item.name)
-            local variants = values[key]
-            if not variants then continue end
-
+            local key       = string.lower(item.name)
             local sellPrice = parseNumber(item.price)
-            local valueData, isUnderrap
 
-            if source == "manual" then
-                if not sellPrice then continue end
-                valueData = nil
-                local wantFin = item.finisher and true or false
-                for _, v in ipairs(variants) do
-                    if v.finisher == wantFin then valueData = v break end
-                end
-                if not valueData then valueData = variants[1] end
-                local threshold = valueData.underThreshold or (valueData.value - DEFAULT_UNDER)
-                isUnderrap = sellPrice <= threshold
-            else
-                valueData, isUnderrap = analyzeItem(variants, item.finisher, sellPrice)
+            -- Manual lookup: exact finisher match first, then fallback
+            local finKey = key .. (item.finisher and "|1" or "|0")
+            local manualData = manualValues[finKey]
+            if not manualData then
+                -- fallback: try the other variant
+                local altKey = key .. (item.finisher and "|0" or "|1")
+                manualData = manualValues[altKey]
             end
 
-            if not valueData then continue end
+            -- Auto lookup: exact finisher match first, then fallback
+            local autoData = values[finKey]
+            if not autoData then
+                local altKey = key .. (item.finisher and "|0" or "|1")
+                autoData = values[altKey]
+            end
+
+            -- Check manual underrap
+            local manualUnderrap = false
+            local manualRealValue, manualThreshold, manualCategory, manualUnderVal, manualProfit
+            if manualData then
+                manualRealValue = manualData.value
+                manualUnderVal  = manualData.under or 0
+                local manualDeduction = (manualUnderVal > 0) and manualUnderVal or 30
+                manualThreshold = manualRealValue - manualDeduction
+                manualCategory  = manualData.category or "unknown"
+                if sellPrice and sellPrice <= manualThreshold then
+                    manualUnderrap = true
+                    manualProfit = manualThreshold - sellPrice
+                end
+            end
+
+            -- Check auto underrap
+            local autoUnderrap = false
+            local autoRealValue, autoThreshold, autoCategory, autoUnderVal, autoProfit
+            if autoData then
+                autoRealValue = autoData.value
+                autoUnderVal  = autoData.under or 0
+                local autoDeduction = (autoUnderVal > 0) and autoUnderVal or 30
+                autoThreshold = autoRealValue - autoDeduction
+                autoCategory  = autoData.category or "unknown"
+                if sellPrice and sellPrice <= autoThreshold then
+                    autoUnderrap = true
+                    autoProfit = autoThreshold - sellPrice
+                end
+            end
+
+            -- Determine what to report: manual first, then auto fallback
+            local isUnderrap = manualUnderrap or autoUnderrap
+            local primaryValue = manualData and manualRealValue or (autoData and autoRealValue or nil)
+            local primaryCat   = manualData and manualCategory or (autoData and autoCategory or "unknown")
+            local primaryUnder = manualData and manualUnderVal or (autoData and autoUnderVal or 0)
+
+            if not primaryValue then continue end
+
+            table.insert(results, string.format(
+                "%s | Price: %s | Value: %s | Cat: %s%s%s",
+                item.name, item.price, tostring(primaryValue), primaryCat,
+                item.finisher and " | FINISHER" or "",
+                isUnderrap and " | <UNDERRAP>" or ""
+            ))
 
             if isUnderrap then
                 underrapCount += 1
-                local realValue = valueData.value
-                local profit = realValue - sellPrice
-                local pctOff = math.floor((1 - sellPrice / realValue) * 100)
-                local sourceLabel = source == "manual" and "Manual" or "BBValues"
-                local variantCount = #variants
 
-                local variantNote = ""
-                if variantCount > 1 then
-                    local catList = {}
-                    for _, v in ipairs(variants) do
-                        local label = v.category .. (v.finisher and " ✨" or "")
-                        if not table.find(catList, label) then catList[#catList + 1] = label end
-                    end
-                    variantNote = string.format("\n⚠️ %d variants: %s\nMatched: **%s%s** (%s)",
-                        variantCount, table.concat(catList, ", "),
-                        valueData.category, valueData.finisher and " Finisher" or "",
-                        tostring(realValue))
-                end
+                -- Webhook uses the primary (manual if available, else auto) data
+                local webhookValue = manualUnderrap and manualRealValue or autoRealValue
+                local webhookThreshold = manualUnderrap and manualThreshold or autoThreshold
+                local webhookProfit = manualUnderrap and manualProfit or autoProfit
+                local webhookUnder = manualUnderrap and manualUnderVal or autoUnderVal
+                local pctOff = math.floor((1 - sellPrice / webhookThreshold) * 100)
 
-                -- Webhook (fire-and-forget — tidak blocking scan)
-                task.spawn(sendWebhook, {
+                sendWebhook({
                     embeds = {{
-                        title = "🎯 UNDERRAP (" .. sourceLabel .. ")",
-                        description = string.format("**%s** selling **%d%%** below value!%s", item.name, pctOff, variantNote),
+                        title = "🎯 UNDERRAP FOUND",
+                        description = string.format("**%s** is selling **%d%%** below %s!", item.name, pctOff, webhookUnder > 0 and "under threshold" or "value"),
                         color = 0x00FF88,
                         fields = {
-                            { name = "📦 Item",     value = item.name,                                   inline = true },
-                            { name = "💰 Price",    value = string.format("`%s`", tostring(item.price)), inline = true },
-                            { name = "💎 Value",    value = string.format("`%s`", tostring(realValue)),  inline = true },
-                            { name = "📈 Profit",   value = string.format("`+%s`", tostring(profit)),    inline = true },
-                            { name = "🏷️ Category", value = valueData.category,                          inline = true },
-                            { name = "⚔️ Finisher", value = item.finisher and "✨ Yes" or "No",          inline = true },
-                            { name = "👤 Seller",   value = string.format("[%s](https://www.roblox.com/users/%s/profile)", username, tostring(ownerId)), inline = true },
-                            { name = "🔗 Join",     value = string.format("[Click](%s)", joinLink),      inline = true },
-                            { name = "📋 Script",   value = string.format(
+                            { name = "📦 Item",       value = item.name,                                    inline = true },
+                            { name = "💰 Price",      value = string.format("`%s`", tostring(item.price)),  inline = true },
+                            { name = "💎 Value",      value = string.format("`%s`", tostring(webhookValue)),   inline = true },
+                            { name = "🔻 Under",      value = string.format("`%s`", webhookUnder > 0 and tostring(webhookUnder) or "—"), inline = true },
+                            { name = "📈 Profit",     value = string.format("`+%s`", tostring(webhookProfit)),     inline = true },
+                            { name = "🏷️ Category",  value = primaryCat,                                     inline = true },
+                            { name = "⚔️ Finisher",  value = item.finisher and "✨ Yes" or "No",           inline = true },
+                            { name = "👤 Seller",    value = string.format("[%s](https://www.roblox.com/users/%s/profile)", username, tostring(ownerId)), inline = true },
+                            { name = "🔗 Join Server", value = string.format("[Click to Join](%s)", joinLink), inline = true },
+                            { name = "📋 Join Script", value = string.format(
                                 "```lua\ngame:GetService(\"TeleportService\"):TeleportToPlaceInstance(%s, \"%s\", game.Players.LocalPlayer)\n```",
                                 tostring(PLACE_ID), currentJobId
                             ), inline = false },
-                            { name = "🌐 Browser",  value = string.format("```\n%s\n```", deepLink), inline = false },
+                            { name = "🌐 Join (Tanpa Executor)", value = string.format(
+                                "Copy lalu paste ke address bar browser:\n```\n%s\n```", deepLink
+                            ), inline = false },
+                            { name = "🆔 Job ID", value = string.format("`%s`", currentJobId), inline = false },
                         },
-                        footer = { text = sourceLabel .. " · " .. currentJobId },
+                        footer = { text = "Underrap Scanner · " .. currentJobId },
                         timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
                     }},
                 })
 
-                -- API scan post (fire-and-forget)
-                task.spawn(postScanToAPI, {
-                    item_name    = item.name,
-                    price        = sellPrice or 0,
-                    real_value   = realValue,
-                    seller       = username,
-                    display_name = getDisplayName(ownerId) or username,
-                    finisher     = item.finisher and 1 or 0,
-                    category     = valueData.category,
-                    profit       = profit,
-                    job_id       = currentJobId,
-                    place_id     = PLACE_ID,
-                    source       = source,
-                })
+                -- POST to bot API: send manual scan if manual found underrap
+                if manualUnderrap then
+                    postScanToAPI({
+                        item_name  = item.name,
+                        price      = sellPrice or 0,
+                        real_value = manualRealValue,
+                        seller     = username,
+                        display_name = getDisplayName(ownerId) or username,
+                        finisher   = item.finisher and 1 or 0,
+                        category   = manualCategory,
+                        profit     = manualProfit,
+                        job_id     = currentJobId,
+                        place_id   = PLACE_ID,
+                        source     = "manual",
+                    })
+                end
+
+                -- POST to bot API: send auto scan if auto found underrap
+                if autoUnderrap then
+                    postScanToAPI({
+                        item_name  = item.name,
+                        price      = sellPrice or 0,
+                        real_value = autoRealValue,
+                        seller     = username,
+                        display_name = getDisplayName(ownerId) or username,
+                        finisher   = item.finisher and 1 or 0,
+                        category   = autoCategory,
+                        profit     = autoProfit,
+                        job_id     = currentJobId,
+                        place_id   = PLACE_ID,
+                        source     = "auto",
+                    })
+                end
+
+                task.wait(0.1)
             end
         end
 
-        -- Yield setiap 10 booth agar Roblox tidak freeze
-        if boothCount % 10 == 0 then RunService.Heartbeat:Wait() end
+        task.wait(0)
+        table.insert(results, "")
     end
 
-    if shouldMark then markServerScanned(currentJobId) end
-    print(string.format("[scan] %d booths, %d underrap (%s)", boothCount, underrapCount, source))
+    local output = table.concat(results, "\n")
+    if writefile then writefile("booth_scan_results.txt", output) end
 
-    -- Auto hop setelah scan selesai (dipanggil di dalam scanAllBooths, sama seperti flow lama)
-    if shouldMark then
+    -- Mark this server as scanned AFTER completing scan
+    markServerScanned(currentJobId)
+
+    print(string.format("[scan] %d booths, %d underrap", boothCount, underrapCount))
+
+    if autoHopEnabled then
         task.wait(0.5)
         doHop("Scan done, hopping")
     end
-
-    return underrapCount
 end
 
--- ══════════════════════════════════════════════════════════════════════════════
--- ── MAIN ──────────────────────────────────────────────────────────────────────
--- ══════════════════════════════════════════════════════════════════════════════
+-- ── INIT ──────────────────────────────────────────────────────────────────────
 
--- Auto teleport ke plaza jika di sub-place
-if game.PlaceId ~= ROOT_PLACE_ID then
-    warn("[init] Wrong place (" .. tostring(game.PlaceId) .. "), teleporting to plaza...")
-    task.wait(1)
-    TeleportService:Teleport(ROOT_PLACE_ID, LocalPlayer)
-    return
-end
-
--- Load persistent state
 loadHopHistory()
 loadScannedServers()
 
--- Auto re-execute script setelah teleport (jika executor support)
+-- ── AUTO TELEPORT TO PLAZA ────────────────────────────────────────────────────
+-- If we're in a sub-place (not the root plaza), teleport back to plaza
+if game.PlaceId ~= ROOT_PLACE_ID then
+    warn("[init] Current PlaceId=" .. tostring(game.PlaceId) .. " != ROOT=" .. tostring(ROOT_PLACE_ID) .. ", teleporting to plaza")
+    task.wait(2)
+    TeleportService:Teleport(ROOT_PLACE_ID, LocalPlayer)
+    -- Script will restart after teleport, so stop here
+    return
+end
+
+-- ── QUEUE ON TELEPORT (auto re-execute after hop) ─────────────────────────────
 if queue_on_teleport then
     pcall(function()
         local src = nil
@@ -711,7 +696,6 @@ if queue_on_teleport then
             if ok and content and content ~= "" then src = content end
         end
         if not src then
-            -- fallback: try to get from httpGet if hosted
             src = 'loadstring(readfile("main.luau"))()'
         end
         queue_on_teleport(src)
@@ -726,81 +710,10 @@ end
 
 print("══════════════════════════════════════════")
 print("  Booth Scanner — Headless Mode")
-print("  Mode: " .. SCAN_MODE)
+print("  Auto Scan: ON | Auto Hop: ON")
 print("  JobId: " .. game.JobId:sub(1, 12))
 print("══════════════════════════════════════════")
 
--- Heartbeat loop (background)
-task.spawn(function()
-    while true do
-        pcall(sendHeartbeat)
-        task.wait(HEARTBEAT_INTERVAL)
-    end
-end)
-
--- Main auto-scan + auto-hop loop (sama seperti flow GUI lama)
-task.spawn(function()
-    task.wait(3) -- tunggu game load
-
-    while true do
-        -- Guard: jangan scan kalau lagi teleport
-        if isTeleporting then
-            print("[auto] Teleporting, skipping scan")
-            task.wait(2)
-            continue
-        end
-
-        local currentJob = game.JobId
-
-        -- Skip jika server sudah di-scan → langsung hop
-        if isServerScanned(currentJob) then
-            print("[auto] Server " .. currentJob:sub(1, 8) .. " already scanned")
-            doHop("Already scanned")
-            -- Jika masih di sini (hop gagal semua), cooldown
-            if game.JobId == currentJob then
-                task.wait(10)
-            end
-            continue
-        end
-
-        -- Load values
-        local bbValues, manualValues = nil, nil
-
-        if SCAN_MODE == "auto" or SCAN_MODE == "both" then
-            bbValues = loadBBValues()
-            if not bbValues or not next(bbValues) then
-                warn("[scan] Failed to load bbvalues")
-                bbValues = nil
-            end
-        end
-
-        if SCAN_MODE == "manual" or SCAN_MODE == "both" then
-            manualValues = loadManualValues()
-            if not manualValues or not next(manualValues) then
-                manualValues = nil
-            end
-        end
-
-        if not bbValues and not manualValues then
-            warn("[scan] No values available, retry in 5s...")
-            task.wait(5)
-            continue
-        end
-
-        -- Scan booth — scan pertama tanpa mark, scan terakhir dengan mark + auto hop
-        if bbValues and manualValues then
-            -- Kedua source: scan auto tanpa mark, scan manual dengan mark (trigger hop)
-            scanAllBooths(bbValues, "auto", false)
-            scanAllBooths(manualValues, "manual", true)
-        elseif bbValues then
-            scanAllBooths(bbValues, "auto", true)
-        elseif manualValues then
-            scanAllBooths(manualValues, "manual", true)
-        end
-
-        -- Jika masih di sini setelah hop (teleport gagal), cooldown
-        if not isTeleporting and game.JobId == currentJob then
-            task.wait(5)
-        end
-    end
-end)
+-- ── START AUTO SCAN (langsung aktif, tidak perlu GUI toggle) ──────────────────
+task.wait(3) -- tunggu game load
+startAutoScan()
