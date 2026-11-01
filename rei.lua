@@ -60,50 +60,86 @@ end
 -- All 6 accounts share which servers have been scanned through the bot.
 -- A server is "scanned" for 5 minutes, then it can be scanned again.
 
-local sharedScannedCache = {} -- local cache: {jobId = timestamp}
+local sharedScannedCache = {} -- local cache: {jobId = timestamp (os.time)}
 local lastScannedFetch = 0
 local SCANNED_FETCH_INTERVAL = 10 -- refresh shared list every 10s
+local SCANNED_LOCAL_TTL = 300 -- 5 minutes local expiry
 
 local function fetchSharedScanned()
     -- Throttle: don't fetch more than once per 10s
     if (os.time() - lastScannedFetch) < SCANNED_FETCH_INTERVAL then
         return
     end
-    local body = httpGet(SCANNED_URL .. ".json", {})
-    if body and body:sub(1, 1) == "{" then
+    local ok2, body = pcall(function()
+        return httpGet(SCANNED_URL .. ".json", {})
+    end)
+    if not ok2 or not body then
+        lastScannedFetch = os.time() -- don't retry immediately on failure
+        return
+    end
+    if body:sub(1, 1) == "{" then
         local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
         if ok and type(data) == "table" then
-            sharedScannedCache = data
+            -- Convert bot timestamps to local os.time scale
+            local now = os.time()
+            local merged = {}
+            for jid, ts in pairs(sharedScannedCache) do
+                if (now - ts) < SCANNED_LOCAL_TTL then
+                    merged[jid] = ts
+                end
+            end
+            for jid, ts in pairs(data) do
+                -- Bot sends unix epoch timestamps; convert relative to local time
+                -- If bot timestamp is within TTL, mark as recently scanned
+                if type(ts) == "number" then
+                    local localTs = merged[jid]
+                    if not localTs then
+                        merged[jid] = now -- treat as "just scanned" if from bot
+                    end
+                end
+            end
+            sharedScannedCache = merged
             lastScannedFetch = os.time()
         end
     end
 end
 
 local function markServerScanned(jobId)
-    -- Report to shared API
-    local json = HttpService:JSONEncode({ job_id = jobId, username = LocalPlayer.Name })
-    local opts = {
-        Url = SCANNED_URL, Method = "POST",
-        Headers = { ["Content-Type"] = "application/json" }, Body = json,
-    }
-    if request then pcall(request, opts)
-    elseif syn and syn.request then pcall(syn.request, opts)
-    else pcall(function() HttpService:PostAsync(SCANNED_URL, json) end)
-    end
-    -- Also update local cache immediately
+    -- Update local cache immediately (this is what matters for hop logic)
     sharedScannedCache[jobId] = os.time()
+    -- Report to shared API in background (fire-and-forget)
+    task.spawn(function()
+        local json = HttpService:JSONEncode({ job_id = jobId, username = LocalPlayer.Name })
+        local opts = {
+            Url = SCANNED_URL, Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" }, Body = json,
+        }
+        if request then pcall(request, opts)
+        elseif syn and syn.request then pcall(syn.request, opts)
+        else pcall(function() HttpService:PostAsync(SCANNED_URL, json) end)
+        end
+    end)
 end
 
 local function isServerScanned(jobId)
-    -- Refresh shared list periodically
-    fetchSharedScanned()
-    -- Check if server is in shared scanned list
+    -- Check local cache with TTL
     local t = sharedScannedCache[jobId]
     if not t then return false end
-    -- Server is scanned if within 5 minutes (300s)
-    -- Note: timestamps from bot are unix epoch, local cache uses os.time()
-    return true -- bot already prunes expired entries
+    -- Expired? Remove and return false
+    if (os.time() - t) >= SCANNED_LOCAL_TTL then
+        sharedScannedCache[jobId] = nil
+        return false
+    end
+    return true
 end
+
+-- Background task to periodically refresh shared scanned list
+task.spawn(function()
+    while true do
+        pcall(fetchSharedScanned)
+        task.wait(SCANNED_FETCH_INTERVAL)
+    end
+end)
 
 -- ── OBSIDIAN ──────────────────────────────────────────────────────────────────
 local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
@@ -1257,14 +1293,22 @@ ThemeManager:SetFolder("BoothScannerBBV")
 SaveManager:SetFolder("BoothScannerBBV")
 SaveManager:BuildConfigSection(Tabs.UISett)
 ThemeManager:ApplyToTab(Tabs.UISett)
+
+-- Apply custom dark minimalist theme (matching C++ dashboard)
+ThemeManager:ApplyThemeData({
+    FontColor       = "f5f5f6",  -- TextHigh: near-white
+    MainColor       = "111113",  -- slightly above pure black
+    AccentColor     = "4ade80",  -- SuccessFg: green accent
+    BackgroundColor = "0c0c0e",  -- Bg: near-black
+    OutlineColor    = "1c1c1f",  -- subtle border
+    BackgroundImage = "",
+})
+
 SaveManager:LoadAutoloadConfig()
 
 -- ── INIT ──────────────────────────────────────────────────────────────────────
 
 loadHopHistory()
-
--- Fetch shared scanned servers on startup
-fetchSharedScanned()
 
 -- ── QUEUE ON TELEPORT (auto re-execute after hop) ─────────────────────────────
 if queue_on_teleport then
