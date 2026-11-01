@@ -393,6 +393,167 @@ local function loadBBValues()
     return {}
 end
 
+-- ── CATEGORY EXCEPTION TABLE ──────────────────────────────────────────────────
+-- Item dengan nama sama tapi beda kategori di bbvalues (122 items).
+-- Format: { [lowercase_name] = { {maxPrice, category}, ... } }
+-- Diurutkan dari threshold terkecil ke terbesar.
+-- Kalau harga jual <= maxPrice → match category itu.
+-- Threshold = midpoint antara 2 variant value.
+-- Entry terakhir pakai math.huge sebagai catch-all.
+-- Data diambil dari bbvalues.uk API 2026-11-01.
+
+local CATEGORY_EXCEPTIONS = {
+    ["astral seraph blade"]              = { { 1938, "Emote" }, { math.huge, "Sword" } },       -- E=162 S=3714
+    ["aurora burst"]                     = { { 11, "Explosion" }, { math.huge, "Emote" } },     -- X=9 E=12
+    ["axolotl scythe"]                   = { { 320, "Emote" }, { math.huge, "Sword" } },        -- E=71 S=569
+    ["ball drop"]                        = { { 119, "Explosion" }, { math.huge, "Emote" } },    -- X=27 E=210
+    ["bittersweet scythe"]               = { { 493, "Emote" }, { math.huge, "Sword" } },        -- E=300 S=686
+    ["blue bunny scythe"]                = { { 334, "Emote" }, { math.huge, "Sword" } },        -- E=116 S=552
+    ["celestial dawn scythe"]            = { { 169, "Emote" }, { math.huge, "Sword" } },        -- E=67 S=271
+    ["celestial hero bow"]               = { { 279, "Emote" }, { math.huge, "Sword" } },        -- E=181 S=377
+    ["cherry blossom spear"]             = { { 423, "Emote" }, { math.huge, "Sword" } },        -- E=143 S=703
+    ["chrome dracula spear"]             = { { 253, "Emote" }, { math.huge, "Sword" } },        -- E=87 S=419
+    ["coal"]                             = { { 2, "Sword" }, { math.huge, "Explosion" } },      -- S=0 X=4
+    ["confetti burst"]                   = { { 4, "Explosion" }, { math.huge, "Emote" } },      -- X=4 E=4
+    ["corrupt blossom bow"]              = { { 249, "Emote" }, { math.huge, "Sword" } },        -- E=78 S=419
+    ["crimson kagune"]                   = { { 1676, "Emote" }, { math.huge, "Sword" } },       -- E=151 S=3200
+    ["crystal ribbon scythe"]            = { { 270, "Emote" }, { math.huge, "Sword" } },        -- E=131 S=409
+    ["death call scythe"]                = { { 305, "Emote" }, { math.huge, "Sword" } },        -- E=50 S=560
+    ["deathrider"]                       = { { 5080, "Emote" }, { math.huge, "Sword" } },       -- E=548 S=9611
+    ["deathwarden lance"]                = { { 193, "Emote" }, { math.huge, "Sword" } },        -- E=46 S=339
+    ["divine ruin bow"]                  = { { 190, "Emote" }, { math.huge, "Sword" } },        -- E=127 S=253
+    ["dual axolotl blade"]               = { { 322, "Emote" }, { math.huge, "Sword" } },        -- E=52 S=591
+    ["dual axolotl scythe"]              = { { 541, "Emote" }, { math.huge, "Sword" } },        -- E=115 S=966
+    ["dual bittersweet blade"]           = { { 493, "Emote" }, { math.huge, "Sword" } },        -- E=450 S=536
+    ["dual bittersweet scythe"]          = { { 536, "Emote" }, { math.huge, "Sword" } },        -- E=525 S=546
+    ["dual blue bunny katana"]           = { { 288, "Emote" }, { math.huge, "Sword" } },        -- E=89 S=486
+    ["dual blue bunny scythe"]           = { { 469, "Emote" }, { math.huge, "Sword" } },        -- E=92 S=846
+    ["dual celestial dawn blade"]        = { { 203, "Emote" }, { math.huge, "Sword" } },        -- E=50 S=355
+    ["dual celestial dawn scythe"]       = { { 244, "Emote" }, { math.huge, "Sword" } },        -- E=45 S=443
+    ["dual celestial hero blade"]        = { { 317, "Emote" }, { math.huge, "Sword" } },        -- E=207 S=427
+    ["dual cherry blossom blade"]        = { { 214, "Emote" }, { math.huge, "Sword" } },        -- E=75 S=353
+    ["dual corrupt blossom blade"]       = { { 204, "Emote" }, { math.huge, "Sword" } },        -- E=67 S=341
+    ["dual crystal ribbon scythe"]       = { { 340, "Emote" }, { math.huge, "Sword" } },        -- E=74 S=606
+    ["dual death call blade"]            = { { 184, "Emote" }, { math.huge, "Sword" } },        -- E=96 S=271
+    ["dual death call scythe"]           = { { 337, "Emote" }, { math.huge, "Sword" } },        -- E=90 S=584
+    ["dual deathwarden blade"]           = { { 175, "Emote" }, { math.huge, "Sword" } },        -- E=61 S=289
+    ["dual electro katana"]              = { { 136, "Emote" }, { math.huge, "Sword" } },        -- E=52 S=220
+    ["dual flashback butterfly blade"]   = { { 195, "Emote" }, { math.huge, "Sword" } },        -- E=51 S=339
+    ["dual flashback butterfly scythe"]  = { { 353, "Emote" }, { math.huge, "Sword" } },        -- E=51 S=655
+    ["dual gothic bunny blade"]          = { { 374, "Emote" }, { math.huge, "Sword" } },        -- E=147 S=600
+    ["dual gothic bunny scythe"]         = { { 545, "Emote" }, { math.huge, "Sword" } },        -- E=121 S=969
+    ["dual gothic heartpiercer blade"]   = { { 211, "Emote" }, { math.huge, "Sword" } },        -- E=90 S=331
+    ["dual hazy katana"]                 = { { 247, "Emote" }, { math.huge, "Sword" } },        -- E=76 S=417
+    ["dual hazy scythe"]                 = { { 471, "Emote" }, { math.huge, "Sword" } },        -- E=122 S=820
+    ["dual hidden beast blade"]          = { { 149, "Emote" }, { math.huge, "Sword" } },        -- E=78 S=220
+    ["dual hidden beast scythe"]         = { { 304, "Emote" }, { math.huge, "Sword" } },        -- E=118 S=489
+    ["dual jade blade"]                  = { { 122, "Emote" }, { math.huge, "Sword" } },        -- E=27 S=216
+    ["dual jade scythe"]                 = { { 201, "Emote" }, { math.huge, "Sword" } },        -- E=53 S=349
+    ["dual luv4pain blade"]              = { { 286, "Emote" }, { math.huge, "Sword" } },        -- E=71 S=500
+    ["dual luv4pain scythe"]             = { { 386, "Emote" }, { math.huge, "Sword" } },        -- E=101 S=671
+    ["dual masked horror blade"]         = { { 146, "Emote" }, { math.huge, "Sword" } },        -- E=60 S=232
+    ["dual masked horror scythe"]        = { { 223, "Emote" }, { math.huge, "Sword" } },        -- E=72 S=373
+    ["dual moon cycle scythe"]           = { { 223, "Emote" }, { math.huge, "Sword" } },        -- E=83 S=362
+    ["dual moonlight blade"]             = { { 144, "Emote" }, { math.huge, "Sword" } },        -- E=59 S=228
+    ["dual neo-neko katana"]             = { { 476, "Emote" }, { math.huge, "Sword" } },        -- E=168 S=784
+    ["dual primordial blade"]            = { { 142, "Emote" }, { math.huge, "Sword" } },        -- E=65 S=218
+    ["dual prince legacy scythe"]        = { { 373, "Emote" }, { math.huge, "Sword" } },        -- E=147 S=598
+    ["dual prismatic gem blade"]         = { { 174, "Emote" }, { math.huge, "Sword" } },        -- E=88 S=259
+    ["dual prismatic gem scythe"]        = { { 220, "Emote" }, { math.huge, "Sword" } },        -- E=65 S=375
+    ["dual radiant duckling kunai"]      = { { 199, "Emote" }, { math.huge, "Sword" } },        -- E=44 S=354
+    ["dual reborn wings blade"]          = { { 221, "Emote" }, { math.huge, "Sword" } },        -- E=81 S=360
+    ["dual riftflare blade"]             = { { 207, "Emote" }, { math.huge, "Sword" } },        -- E=90 S=324
+    ["dual royal relic blade"]           = { { 114, "Emote" }, { math.huge, "Sword" } },        -- E=54 S=174
+    ["dual silk divinity blade"]         = { { 175, "Emote" }, { math.huge, "Sword" } },        -- E=65 S=285
+    ["dual spring saber"]                = { { 183, "Emote" }, { math.huge, "Sword" } },        -- E=46 S=319
+    ["dual spring scythe"]               = { { 205, "Emote" }, { math.huge, "Sword" } },        -- E=69 S=341
+    ["dual starfish blade"]              = { { 162, "Emote" }, { math.huge, "Sword" } },        -- E=70 S=253
+    ["dual starfish scythe"]             = { { 277, "Emote" }, { math.huge, "Sword" } },        -- E=60 S=494
+    ["dual strawberry cake blade"]       = { { 207, "Emote" }, { math.huge, "Sword" } },        -- E=92 S=322
+    ["dual sugarcoated saber"]           = { { 689, "Emote" }, { math.huge, "Sword" } },        -- E=497 S=881
+    ["dual verdant thorn blade"]         = { { 881, "Sword" }, { math.huge, "Emote" } },        -- S=640 E=1121
+    ["dual y2k blade"]                   = { { 434, "Emote" }, { math.huge, "Sword" } },        -- E=124 S=744
+    ["electro bow"]                      = { { 196, "Emote" }, { math.huge, "Sword" } },        -- E=66 S=325
+    ["elemental"]                        = { { 26, "Explosion" }, { math.huge, "Emote" } },     -- X=25 E=27
+    ["ethereal bombardment"]             = { { 1435, "Explosion" }, { math.huge, "Sword" } },   -- X=352 S=2518
+    ["event horizon"]                    = { { 328, "Sword" }, { math.huge, "Emote" } },        -- S=7 E=648
+    ["flashback butterfly scythe"]       = { { 155, "Emote" }, { math.huge, "Sword" } },        -- E=35 S=275
+    ["ghostly vengeance"]                = { { 79, "Explosion" }, { math.huge, "Sword" } },     -- X=68 S=89
+    ["giant egg"]                        = { { 504, "Emote" }, { math.huge, "Explosion" } },    -- E=9 X=999
+    ["gothic bunny scythe"]              = { { 245, "Emote" }, { math.huge, "Sword" } },        -- E=66 S=423
+    ["gothic heartpiercer bow"]          = { { 237, "Emote" }, { math.huge, "Sword" } },        -- E=111 S=362
+    ["gravelight"]                       = { { 2502, "Emote" }, { math.huge, "Sword" } },       -- E=317 S=4687
+    ["guardian of the underworld"]       = { { 2109, "Explosion" }, { math.huge, "Sword" } },   -- X=236 S=3981
+    ["gyaru katana"]                     = { { 2620, "Emote" }, { math.huge, "Sword" } },       -- E=252 S=4987
+    ["hazy scythe"]                      = { { 182, "Emote" }, { math.huge, "Sword" } },        -- E=57 S=306
+    ["hidden beast scythe"]              = { { 173, "Emote" }, { math.huge, "Sword" } },        -- E=72 S=273
+    ["higanbana katana"]                 = { { 2494, "Emote" }, { math.huge, "Sword" } },       -- E=318 S=4669
+    ["high noon"]                        = { { 8, "Explosion" }, { math.huge, "Emote" } },      -- X=3 E=12
+    ["jade scythe"]                      = { { 162, "Emote" }, { math.huge, "Sword" } },        -- E=37 S=287
+    ["luv4pain scythe"]                  = { { 163, "Emote" }, { math.huge, "Sword" } },        -- E=61 S=265
+    ["masked horror scythe"]             = { { 192, "Emote" }, { math.huge, "Sword" } },        -- E=146 S=238
+    ["moon cycle scythe"]                = { { 154, "Emote" }, { math.huge, "Sword" } },        -- E=69 S=238
+    ["moonlight bow"]                    = { { 223, "Emote" }, { math.huge, "Sword" } },        -- E=56 S=390
+    ["nebula blade"]                     = { { 642, "Explosion" }, { math.huge, "Sword" } },    -- X=39 S=1244
+    ["neo-neko needle"]                  = { { 469, "Emote" }, { math.huge, "Sword" } },        -- E=129 S=809
+    ["night raver"]                      = { { 2383, "Emote" }, { 6161, "Explosion" }, { math.huge, "Sword" } }, -- E=1766 X=2999 S=9323
+    ["phantom ops"]                      = { { 2403, "Emote" }, { math.huge, "Sword" } },       -- E=205 S=4600
+    ["phantom pact"]                     = { { 548, "Explosion" }, { 5720, "Emote" }, { math.huge, "Sword" } }, -- X=547 E=548 S=10892
+    ["primordial lance"]                 = { { 164, "Emote" }, { math.huge, "Sword" } },        -- E=74 S=253
+    ["prince legacy scythe"]             = { { 201, "Emote" }, { math.huge, "Sword" } },        -- E=121 S=280
+    ["prismatic gem scythe"]             = { { 166, "Emote" }, { math.huge, "Sword" } },        -- E=92 S=240
+    ["proyection sorcery katana"]        = { { 1981, "Emote" }, { math.huge, "Sword" } },       -- E=172 S=3789
+    ["radiant duckling lance"]           = { { 224, "Emote" }, { math.huge, "Sword" } },        -- E=92 S=355
+    ["reborn wings bow"]                 = { { 335, "Emote" }, { math.huge, "Sword" } },        -- E=141 S=528
+    ["red moon katana"]                  = { { 1914, "Emote" }, { math.huge, "Sword" } },       -- E=584 S=3243
+    ["regret blades"]                    = { { 10887, "Emote" }, { math.huge, "Sword" } },      -- E=540 S=21234
+    ["riftflare katana"]                 = { { 1762, "Explosion" }, { math.huge, "Sword" } },   -- X=321 S=3202
+    ["riftflare lance"]                  = { { 313, "Emote" }, { math.huge, "Sword" } },        -- E=104 S=521
+    ["royal relic bow"]                  = { { 135, "Emote" }, { math.huge, "Sword" } },        -- E=45 S=225
+    ["sea turtle"]                       = { { 6182, "Emote" }, { math.huge, "Sword" } },       -- E=1446 S=10917
+    ["silk divinity bow"]                = { { 178, "Emote" }, { math.huge, "Sword" } },        -- E=69 S=286
+    ["snow globe"]                       = { { 24, "Emote" }, { math.huge, "Explosion" } },     -- E=5 X=43
+    ["spring scythe"]                    = { { 162, "Emote" }, { math.huge, "Sword" } },        -- E=56 S=267
+    ["starfall"]                         = { { 2525002, "Explosion" }, { math.huge, "Sword" } }, -- X=4 S=5050000
+    ["starfish scythe"]                  = { { 225, "Emote" }, { math.huge, "Sword" } },        -- E=183 S=266
+    ["starlit halo wings"]               = { { 7993, "Emote" }, { math.huge, "Sword" } },       -- E=2604 S=13382
+    ["strawberry cake lance"]            = { { 238, "Emote" }, { math.huge, "Sword" } },        -- E=80 S=395
+    ["sugarcoated bow"]                  = { { 380, "Emote" }, { math.huge, "Sword" } },        -- E=177 S=582
+    ["thronebreaker"]                    = { { 4020, "Explosion" }, { math.huge, "Sword" } },   -- X=4 S=8036
+    ["verdant thorn lance"]              = { { 208, "Emote" }, { math.huge, "Sword" } },        -- E=178 S=237
+    ["volcanic surge"]                   = { { 5, "Explosion" }, { math.huge, "Sword" } },      -- X=2 S=8
+    ["widowbloom bow"]                   = { { 227, "Emote" }, { math.huge, "Sword" } },        -- E=54 S=399
+    ["wolf greatsword"]                  = { { 8283, "Emote" }, { math.huge, "Sword" } },       -- E=1985 S=14581
+    ["y2k bow"]                          = { { 396, "Emote" }, { math.huge, "Sword" } },        -- E=129 S=662
+}
+
+-- ── Resolve category exception ───────────────────────────────────────────────
+-- Kalau item ada di exception table, langsung match category berdasarkan harga.
+-- Return: matchedVariant, isUnderrap  (atau nil jika tidak ada di tabel / variant tidak ditemukan)
+local function resolveException(itemName, variants, sellPrice)
+    local exc = CATEGORY_EXCEPTIONS[string.lower(itemName)]
+    if not exc then return nil end
+
+    -- Cari category yang cocok berdasarkan harga jual
+    local targetCat = nil
+    for _, rule in ipairs(exc) do
+        if sellPrice <= rule[1] then
+            targetCat = rule[2]
+            break
+        end
+    end
+    if not targetCat then return nil end
+
+    -- Cari variant bbvalues yang category-nya cocok
+    for _, v in ipairs(variants) do
+        if v.category == targetCat then
+            local threshold = v.value - DEFAULT_UNDER
+            return v, sellPrice <= threshold
+        end
+    end
+    return nil -- variant tidak ditemukan (seharusnya tidak terjadi)
+end
+
 -- Analisis smart variant matching
 -- 
 -- Fakta dari bbvalues.uk API:
@@ -411,9 +572,15 @@ end
 --      → cek harga jual, cocokkan ke variant yang value-nya paling dekat
 --   4. Hanya report underrap kalau harga jual di bawah SEMUA variant yang cocok
 
-local function analyzeItem(variants, hasFinisher, sellPrice)
+local function analyzeItem(itemName, variants, hasFinisher, sellPrice)
     if not sellPrice then
         return nil, false
+    end
+
+    -- Step 0: Cek exception table dulu (item dengan nama sama beda category)
+    local excVariant, excUnderrap = resolveException(itemName, variants, sellPrice)
+    if excVariant then
+        return excVariant, excUnderrap
     end
 
     -- Step 1: Filter berdasarkan finisher status booth
@@ -925,8 +1092,8 @@ scanAllBooths = function(values, source)
                 local threshold = valueData.underThreshold or (valueData.value - DEFAULT_UNDER)
                 isUnderrap = sellPrice <= threshold
             else
-                -- Auto mode: pakai smart variant matching
-                valueData, isUnderrap = analyzeItem(variants, item.finisher, sellPrice)
+                -- Auto mode: pakai smart variant matching (with exception table)
+                valueData, isUnderrap = analyzeItem(item.name, variants, item.finisher, sellPrice)
             end
             if not valueData then continue end -- tidak bisa parse harga
             local realValue = valueData.value
