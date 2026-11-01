@@ -881,9 +881,26 @@ scanAllBooths = function(values, source)
         local items    = scanCurrentBooth()
         local username = getUsername(ownerId)
 
+        -- Read seller's leaderstats (Sales & RAP) if they're in the server
+        local sellerSales, sellerRap = -1, -1
+        do
+            local sellerPlayer = Players:GetPlayerByUserId(ownerId)
+            if sellerPlayer then
+                local ls = sellerPlayer:FindFirstChild("leaderstats")
+                if ls then
+                    local salesVal = ls:FindFirstChild("Sales")
+                    if salesVal and salesVal:IsA("IntValue") then sellerSales = salesVal.Value end
+                    local rapVal = ls:FindFirstChild("RAP")
+                    if rapVal and rapVal:IsA("IntValue") then sellerRap = rapVal.Value end
+                end
+            end
+        end
+
         table.insert(results, string.format("=== Booth: %s (%s) ===", username, tostring(ownerId)))
 
         for _, item in ipairs(items) do
+            item.sellerSales = sellerSales
+            item.sellerRap   = sellerRap
             local key       = string.lower(item.name)
             local variants  = values[key]
             if not variants then continue end
@@ -997,6 +1014,9 @@ scanAllBooths = function(values, source)
                     real_value = realValue,
                     seller     = username,
                     display_name = getDisplayName(ownerId) or username,
+                    seller_id  = ownerId,
+                    sales      = item.sellerSales or -1,
+                    rap        = item.sellerRap or -1,
                     finisher   = item.finisher and 1 or 0,
                     category   = category,
                     profit     = profit,
