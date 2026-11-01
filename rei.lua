@@ -14,16 +14,16 @@ local PLACE_ID      = ROOT_PLACE_ID
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1510395545141907478/cN3zzPCevXKBL4nEBefV7Z6m_ufHSUYjlBHKyPK8sZGl2VufTkamnNpxL58DWvF5z7hs"
 local SCANS_URL   = "http://hyper.ypnode.my.id:10750/scans"
 local HEARTBEAT_URL = "http://hyper.ypnode.my.id:10750/heartbeat"
+local BBVALUES_URL = "http://hyper.ypnode.my.id:10750/bbvalues.json" -- proxy via bot (bbvalues.uk down di luau)
 local VALUES_URL  = "http://hyper.ypnode.my.id:10750/values.json" -- manual values dari bot
+local SCANNED_URL = "http://hyper.ypnode.my.id:10750/scanned" -- shared scanned servers (cross-account)
 local MIN_VALUE      = 100 -- hanya scan item dengan value > ini
 local DEFAULT_UNDER  = 20  -- default under deduction
 local HOP_SKIP_COUNT = 20
 local HOP_HISTORY_FILE = "hop_history.json"
-local SCANNED_SERVERS_FILE = "scanned_servers.json"
 -- ─────────────────────────────────────────────────────────────────────────────
 
 local hopHistory = {}
-local scannedServers = {}
 local isTeleporting = false
 
 local function loadHopHistory()
@@ -56,36 +56,53 @@ local function isInHistory(jobId)
     return false
 end
 
-local function loadScannedServers()
-    if readfile then
-        local ok, content = pcall(readfile, SCANNED_SERVERS_FILE)
-        if ok and content ~= "" then
-            local ok2, data = pcall(function() return HttpService:JSONDecode(content) end)
-            if ok2 and type(data) == "table" then scannedServers = data return end
-        end
-    end
-    scannedServers = {}
-end
+-- ── SHARED SCANNED SERVERS (via bot API — cross-account) ──────────────────────
+-- All 6 accounts share which servers have been scanned through the bot.
+-- A server is "scanned" for 5 minutes, then it can be scanned again.
 
-local function saveScannedServers()
-    if writefile then
-        pcall(writefile, SCANNED_SERVERS_FILE, HttpService:JSONEncode(scannedServers))
+local sharedScannedCache = {} -- local cache: {jobId = timestamp}
+local lastScannedFetch = 0
+local SCANNED_FETCH_INTERVAL = 10 -- refresh shared list every 10s
+
+local function fetchSharedScanned()
+    -- Throttle: don't fetch more than once per 10s
+    if (os.time() - lastScannedFetch) < SCANNED_FETCH_INTERVAL then
+        return
+    end
+    local body = httpGet(SCANNED_URL .. ".json", {})
+    if body and body:sub(1, 1) == "{" then
+        local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+        if ok and type(data) == "table" then
+            sharedScannedCache = data
+            lastScannedFetch = os.time()
+        end
     end
 end
 
 local function markServerScanned(jobId)
-    scannedServers[jobId] = os.time()
-    local now = os.time()
-    local cleaned = {}
-    for id, t in pairs(scannedServers) do
-        if now - t < 300 then cleaned[id] = t end
+    -- Report to shared API
+    local json = HttpService:JSONEncode({ job_id = jobId, username = LocalPlayer.Name })
+    local opts = {
+        Url = SCANNED_URL, Method = "POST",
+        Headers = { ["Content-Type"] = "application/json" }, Body = json,
+    }
+    if request then pcall(request, opts)
+    elseif syn and syn.request then pcall(syn.request, opts)
+    else pcall(function() HttpService:PostAsync(SCANNED_URL, json) end)
     end
-    scannedServers = cleaned
-    saveScannedServers()
+    -- Also update local cache immediately
+    sharedScannedCache[jobId] = os.time()
 end
 
 local function isServerScanned(jobId)
-    return scannedServers[jobId] ~= nil
+    -- Refresh shared list periodically
+    fetchSharedScanned()
+    -- Check if server is in shared scanned list
+    local t = sharedScannedCache[jobId]
+    if not t then return false end
+    -- Server is scanned if within 5 minutes (300s)
+    -- Note: timestamps from bot are unix epoch, local cache uses os.time()
+    return true -- bot already prunes expired entries
 end
 
 -- ── OBSIDIAN ──────────────────────────────────────────────────────────────────
@@ -271,10 +288,8 @@ local function loadBBValuesFromFile()
 end
 
 local function fetchBBValuesRaw()
-    return httpGet("https://bbvalues.uk/api/items", {
-        ["x-bbv-handshake"] = "v1-secure-request",
-        ["Referer"] = "https://bbvalues.uk/values/",
-    })
+    -- Fetch via bot proxy (bbvalues.uk unreliable from Roblox executor)
+    return httpGet(BBVALUES_URL, {})
 end
 
 local function loadBBValues()
@@ -1039,11 +1054,10 @@ MainGroup:AddButton({
                 end
             end
 
-            -- Also clear scanned servers so current server can be re-scanned with new values
+            -- Also clear local scanned cache so current server can be re-scanned with new values
             local currentJob = game.JobId
-            if scannedServers[currentJob] then
-                scannedServers[currentJob] = nil
-                saveScannedServers()
+            if sharedScannedCache[currentJob] then
+                sharedScannedCache[currentJob] = nil
             end
 
             Library:Notify({
@@ -1248,7 +1262,9 @@ SaveManager:LoadAutoloadConfig()
 -- ── INIT ──────────────────────────────────────────────────────────────────────
 
 loadHopHistory()
-loadScannedServers()
+
+-- Fetch shared scanned servers on startup
+fetchSharedScanned()
 
 -- ── QUEUE ON TELEPORT (auto re-execute after hop) ─────────────────────────────
 if queue_on_teleport then
