@@ -402,6 +402,74 @@ end
 -- Entry terakhir pakai math.huge sebagai catch-all.
 -- Data diambil dari bbvalues.uk API 2026-11-01.
 
+-- ── ASSET ID → CATEGORY MAP ───────────────────────────────────────────────────
+-- Roblox asset ID dari booth image → category.
+-- Ini lebih akurat daripada price-based matching untuk item dual/triple category.
+-- Format: { ["assetId"] = "Category" }
+-- Asset ID tanpa prefix "rbxassetid://"
+
+local ASSET_CATEGORY_MAP = {
+    -- Crimson Kagune
+    ["16266665378"]        = "Sword",
+    ["103991473928751"]    = "Emote",
+    ["122220220272317"]    = "Explosion",
+    -- Starfall
+    ["129131763936203"]    = "Explosion",
+    ["17757365730"]        = "Sword",
+    -- Dual Gothic Heartpiercer Blade
+    ["121538626129831"]    = "Sword",
+    ["122139166298284"]    = "Emote",
+    -- Nebula Blade
+    ["15965812017"]        = "Sword",
+    ["15964013112"]        = "Explosion",
+    -- Radiant Duckling Lance
+    ["135913442813047"]    = "Emote",
+    ["77190288652210"]     = "Sword",
+    -- Primordial Lance
+    ["72309796878320"]     = "Emote",
+    ["98895700264373"]     = "Sword",
+    -- Night Raver
+    ["114649402355251"]    = "Explosion",
+    ["136298174298208"]    = "Emote",
+    ["126034810019036"]    = "Sword",
+    -- Dual Hidden Beast Blade
+    ["77798050960530"]     = "Sword",
+    ["94990619459773"]     = "Emote",
+    -- Higanbana Katana
+    ["91449061436707"]     = "Emote",
+    ["135684393446468"]    = "Sword",
+    -- Strawberry Cake Lance
+    ["72687727611270"]     = "Sword",
+    ["132530935111167"]    = "Emote",
+    -- Ball Drop
+    ["15862986776"]        = "Emote",
+    ["78573433974758"]     = "Explosion",
+    -- Dual Blue Bunny Katana
+    ["135381650702325"]    = "Sword",
+    ["97054245713645"]     = "Emote",
+}
+
+-- Resolve category dari asset ID booth image
+-- Return: matchedVariant, isUnderrap (atau nil kalau asset ID tidak dikenal)
+local function resolveByAssetId(assetId, variants, sellPrice)
+    if not assetId or assetId == "" then return nil end
+    -- Strip prefix
+    local id = assetId:match("(%d+)$")
+    if not id then return nil end
+    
+    local targetCat = ASSET_CATEGORY_MAP[id]
+    if not targetCat then return nil end
+    
+    -- Cari variant bbvalues yang category-nya cocok
+    for _, v in ipairs(variants) do
+        if v.category == targetCat then
+            local threshold = v.value - DEFAULT_UNDER
+            return v, sellPrice and sellPrice <= threshold or false
+        end
+    end
+    return nil
+end
+
 local CATEGORY_EXCEPTIONS = {
     ["astral seraph blade"]              = { { 1938, "Emote" }, { math.huge, "Sword" } },       -- E=162 S=3714
     ["aurora burst"]                     = { { 11, "Explosion" }, { math.huge, "Emote" } },     -- X=9 E=12
@@ -572,12 +640,18 @@ end
 --      → cek harga jual, cocokkan ke variant yang value-nya paling dekat
 --   4. Hanya report underrap kalau harga jual di bawah SEMUA variant yang cocok
 
-local function analyzeItem(itemName, variants, hasFinisher, sellPrice)
+local function analyzeItem(itemName, variants, hasFinisher, sellPrice, assetId)
     if not sellPrice then
         return nil, false
     end
 
-    -- Step 0: Cek exception table dulu (item dengan nama sama beda category)
+    -- Step 0a: Cek asset ID dulu (paling akurat — langsung dari booth image)
+    local assetVariant, assetUnderrap = resolveByAssetId(assetId, variants, sellPrice)
+    if assetVariant then
+        return assetVariant, assetUnderrap
+    end
+
+    -- Step 0b: Fallback ke exception table (price-based matching)
     local excVariant, excUnderrap = resolveException(itemName, variants, sellPrice)
     if excVariant then
         return excVariant, excUnderrap
@@ -821,11 +895,20 @@ local function scanCurrentBooth()
     for _, entry in ipairs(list:GetChildren()) do
         local itemName, amount, hasFinisher = "", "", false
         local frame = entry:FindFirstChild("Frame")
+        local assetId = ""
         if frame then
             local nl = frame:FindFirstChild("ItemName")
             if nl and (nl:IsA("TextLabel") or nl:IsA("TextBox")) then itemName = nl.Text end
             local fin = frame:FindFirstChild("Finisher")
             if fin and fin:IsA("GuiObject") then hasFinisher = fin.Visible end
+            -- Extract image asset ID from Frame.Vector
+            local vec = frame:FindFirstChild("Vector")
+            if vec and (vec:IsA("ImageLabel") or vec:IsA("ImageButton")) then
+                local img = vec.Image
+                if img and img ~= "" then
+                    assetId = img
+                end
+            end
         end
         local bb = entry:FindFirstChild("BuyButton")
         if bb then
@@ -836,7 +919,7 @@ local function scanCurrentBooth()
             end
         end
         if itemName ~= "" then
-            table.insert(items, { name = itemName, price = amount, finisher = hasFinisher })
+            table.insert(items, { name = itemName, price = amount, finisher = hasFinisher, assetId = assetId })
         end
     end
     return items
@@ -1093,7 +1176,7 @@ scanAllBooths = function(values, source)
                 isUnderrap = sellPrice <= threshold
             else
                 -- Auto mode: pakai smart variant matching (with exception table)
-                valueData, isUnderrap = analyzeItem(item.name, variants, item.finisher, sellPrice)
+                valueData, isUnderrap = analyzeItem(item.name, variants, item.finisher, sellPrice, item.assetId)
             end
             if not valueData then continue end -- tidak bisa parse harga
             local realValue = valueData.value
