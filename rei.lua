@@ -12,11 +12,13 @@ local TeleportService = game:GetService("TeleportService")
 local ROOT_PLACE_ID = 16581637217
 local PLACE_ID      = ROOT_PLACE_ID
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1510395545141907478/cN3zzPCevXKBL4nEBefV7Z6m_ufHSUYjlBHKyPK8sZGl2VufTkamnNpxL58DWvF5z7hs"
-local SCANS_URL   = "http://hyper.ypnode.my.id:10750/scans"
-local HEARTBEAT_URL = "http://hyper.ypnode.my.id:10750/heartbeat"
-local BBVALUES_URL = "http://hyper.ypnode.my.id:10750/bbvalues.json" -- proxy via bot (bbvalues.uk down di luau)
-local VALUES_URL  = "http://hyper.ypnode.my.id:10750/values.json" -- manual values dari bot
-local SCANNED_URL = "http://hyper.ypnode.my.id:10750/scanned" -- shared scanned servers (cross-account)
+-- Server bot Omni (HTTPS). Ganti di satu tempat ini saja kalau domain berubah.
+local API_BASE      = "https://api.om-ni.my.id"
+local SCANS_URL     = API_BASE .. "/scans"
+local HEARTBEAT_URL = API_BASE .. "/heartbeat"
+local BBVALUES_URL  = API_BASE .. "/bbvalues.json" -- proxy via bot (bbvalues.uk down di luau)
+local VALUES_URL    = API_BASE .. "/values.json"   -- manual values dari bot
+local SCANNED_URL   = API_BASE .. "/scanned"       -- shared scanned servers (cross-account)
 local MIN_VALUE      = 100 -- hanya scan item dengan value > ini
 local DEFAULT_UNDER  = 20  -- default under deduction
 local HOP_SKIP_COUNT = 20
@@ -55,6 +57,11 @@ local function isInHistory(jobId)
     end
     return false
 end
+
+-- Forward declaration: httpGet is defined in UTILITY below, but used by the
+-- shared-scanned code here. Without this, the call hit a nil global and the
+-- shared list silently never loaded.
+local httpGet
 
 -- ── SHARED SCANNED SERVERS (via bot API — cross-account) ──────────────────────
 -- All 6 accounts share which servers have been scanned through the bot.
@@ -163,7 +170,7 @@ local Window = Library:CreateWindow({
 
 -- ── UTILITY ───────────────────────────────────────────────────────────────────
 
-local function httpGet(url, extraHeaders)
+function httpGet(url, extraHeaders)   -- assigns the forward-declared local
     local headers = {
         ["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         ["Accept"] = "application/json",
