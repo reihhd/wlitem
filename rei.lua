@@ -456,6 +456,56 @@ local ASSET_CATEGORY_MAP = {
     ["97054245713645"]     = "Emote",
 }
 
+-- Extend the built-in asset map from an external file so new asset IDs can be added
+-- WITHOUT editing the script. File next to the executor: asset_map.json
+--   Simple form : { "16266665222": "Sword", "15965812017": "Explosion" }
+--   Scraper form: { "Nebula Blade": { "asset_id": "15965...", "category": "Sword" }, ... }
+local ASSET_MAP_FILE = "asset_map.json"
+local function _lastDigits(v)
+    v = tostring(v or "")
+    return v:match("(%d+)$")
+end
+local function loadAssetMapFile()
+    if not readfile then return end
+    local ok, content = pcall(readfile, ASSET_MAP_FILE)
+    if not ok or not content or content == "" then return end
+    local okD, data = pcall(function() return HttpService:JSONDecode(content) end)
+    if not okD or type(data) ~= "table" then
+        warn("[scanner] asset_map.json invalid JSON, ignored")
+        return
+    end
+    local added = 0
+    for k, v in pairs(data) do
+        local id, cat
+        if type(v) == "string" then                 -- { "<assetId>": "Category" }
+            id, cat = _lastDigits(k), v
+        elseif type(v) == "table" then               -- { "<name>": { asset_id, category } }
+            id  = _lastDigits(v.asset_id or v.assetId or v.id)
+            cat = v.category or v.cat or v.type
+        end
+        if id and cat and cat ~= "" then
+            ASSET_CATEGORY_MAP[id] = cat
+            added += 1
+        end
+    end
+    if added > 0 then print(string.format("[scanner] asset_map.json: +%d asset IDs", added)) end
+end
+pcall(loadAssetMapFile)
+
+-- Record asset IDs that aren't mapped yet (name|assetId|guessedCategory) so the map
+-- can be grown from real booths. Written to unknown_assets.txt, de-duplicated.
+local _unknownSeen = {}       -- id -> true (dedup)
+local _unknownLines = {}      -- accumulated lines, rewritten to disk each time
+local function logUnknownAsset(itemName, assetId, guessedCat)
+    local id = _lastDigits(assetId)
+    if not id or ASSET_CATEGORY_MAP[id] or _unknownSeen[id] then return end
+    _unknownSeen[id] = true
+    table.insert(_unknownLines, string.format("%s | %s | %s", tostring(itemName), id, tostring(guessedCat or "?")))
+    if writefile then
+        pcall(writefile, "unknown_assets.txt", table.concat(_unknownLines, "\n") .. "\n")
+    end
+end
+
 -- Resolve category dari asset ID booth image
 -- Return: matchedVariant, isUnderrap (atau nil kalau asset ID tidak dikenal)
 local function resolveByAssetId(assetId, variants, sellPrice)
@@ -1135,6 +1185,23 @@ scanAllBooths = function(values, source)
         end
         if prompt then firePrompt(prompt) task.wait(0.1) end
 
+        -- Booth world location (x, y, z). Stored with each scan so it can be used later.
+        local boothX, boothY, boothZ = 0, 0, 0
+        do
+            local pos
+            local okPivot = pcall(function() pos = booth:GetPivot().Position end)
+            if (not okPivot or not pos) and root and root:IsA("BasePart") then pos = root.Position end
+            if (not pos) and root then
+                local anyPart = root:FindFirstChildWhichIsA("BasePart", true)
+                if anyPart then pos = anyPart.Position end
+            end
+            if pos then
+                boothX = math.floor(pos.X * 100 + 0.5) / 100
+                boothY = math.floor(pos.Y * 100 + 0.5) / 100
+                boothZ = math.floor(pos.Z * 100 + 0.5) / 100
+            end
+        end
+
         local items    = scanCurrentBooth()
         local username = getUsername(ownerId)
 
@@ -1189,6 +1256,12 @@ scanAllBooths = function(values, source)
             local realValue = valueData.value
             local category  = valueData.category
             local rarity    = valueData.rarity
+
+            -- Only matters when the item has >1 category variant (e.g. Nebula Blade Sword + Explosion):
+            -- if this booth's asset ID isn't mapped yet, record it so the map can be completed.
+            if variantCount > 1 and item.assetId and item.assetId ~= "" then
+                logUnknownAsset(item.name, item.assetId, category)
+            end
 
             table.insert(results, string.format(
                 "%s | Price: %s | Value: %s | Cat: %s | Rarity: %s%s%s%s",
@@ -1279,6 +1352,9 @@ scanAllBooths = function(values, source)
                     profit     = profit,
                     job_id     = currentJobId,
                     place_id   = PLACE_ID,
+                    loc_x      = boothX,
+                    loc_y      = boothY,
+                    loc_z      = boothZ,
                     source     = source, -- "manual" or "auto"
                 })
                 task.wait(0.1)
