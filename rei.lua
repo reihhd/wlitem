@@ -20,7 +20,7 @@ local BBVALUES_URL  = API_BASE .. "/bbvalues.json" -- proxy via bot (bbvalues.uk
 local VALUES_URL    = API_BASE .. "/values.json"   -- manual values dari bot
 local SCANNED_URL   = API_BASE .. "/scanned"       -- shared scanned servers (cross-account)
 local MIN_VALUE      = 100 -- hanya scan item dengan value > ini
-local DEFAULT_UNDER  = 20  -- default under deduction
+local DEFAULT_UNDER  = 10  -- default under deduction
 local HOP_SKIP_COUNT = 20
 local HOP_HISTORY_FILE = "hop_history.json"
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -887,9 +887,43 @@ local function getServerList()
     return servers
 end
 
+-- Flag yang di-set TeleportInitFailed kalau teleport gagal di sisi Roblox
+local lastTeleportFailed    = false
+local lastTeleportFailMsg   = nil
+
+-- Listen sekali: kalau Roblox gagal init teleport ("failed to connect to
+-- experience", "please try again", server penuh/expired, rate limit, dll)
+-- event ini yang fire — bukan error dari pemanggilan TeleportToPlaceInstance.
+do
+    local ok = pcall(function()
+        TeleportService.TeleportInitFailed:Connect(function(player, result, message)
+            if player ~= LocalPlayer then return end
+            lastTeleportFailed  = true
+            lastTeleportFailMsg = string.format("%s: %s", tostring(result), tostring(message))
+            warn("[hop] TeleportInitFailed -> " .. lastTeleportFailMsg)
+        end)
+    end)
+    if not ok then
+        warn("[hop] Gagal connect TeleportInitFailed (executor block?)")
+    end
+end
+
+-- return: ok(bool), errMsg(string|nil)
+-- ok=true berarti panggilan teleport diterima Roblox (belum tentu sampai) —
+-- doHop tetap cek game.JobId + lastTeleportFailed untuk konfirmasi.
 local function joinServer(jobId)
     addToHistory(game.JobId)
-    TeleportService:TeleportToPlaceInstance(PLACE_ID, jobId, LocalPlayer)
+    lastTeleportFailed  = false
+    lastTeleportFailMsg = nil
+
+    local ok, err = pcall(function()
+        TeleportService:TeleportToPlaceInstance(PLACE_ID, jobId, LocalPlayer)
+    end)
+    if not ok then
+        warn("[hop] TeleportToPlaceInstance error: " .. tostring(err))
+        return false, tostring(err)
+    end
+    return true, nil
 end
 
 -- Fisher-Yates shuffle dengan seed yang sudah di-randomize
@@ -978,8 +1012,27 @@ local function doHop(reason)
 
         isTeleporting = true
         print(string.format("[hop] Teleporting to %s (attempt %d)", nextServer:sub(1, 8), attempt))
-        joinServer(nextServer)
-        task.wait(8) -- tunggu lebih lama (dari 6s ke 8s) agar teleport punya waktu
+
+        local sent, sendErr = joinServer(nextServer)
+        if not sent then
+            -- Panggilan teleport ditolak langsung (rate limit / argumen salah).
+            -- Jangan hajar lagi cepat-cepat — backoff dulu.
+            isTeleporting = false
+            addToHistory(nextServer)
+            warn("[hop] joinServer ditolak: " .. tostring(sendErr))
+            task.wait(math.min(3 + attempt * 2, 10))
+            continue
+        end
+
+        -- Tunggu teleport. Kalau TeleportInitFailed fire di tengah, stop nunggu
+        -- lebih awal — server penuh/expired, percuma tunggu sampai habis.
+        local waited = 0
+        while waited < 10 do
+            task.wait(0.5)
+            waited += 0.5
+            if game.JobId ~= currentJob then break end
+            if lastTeleportFailed then break end
+        end
 
         if game.JobId ~= currentJob then
             print("[hop] Teleport berhasil!")
@@ -988,8 +1041,18 @@ local function doHop(reason)
 
         isTeleporting = false
         addToHistory(nextServer)
-        warn("[hop] Teleport gagal attempt " .. attempt)
-        task.wait(2)
+
+        if lastTeleportFailed then
+            -- "failed to connect to experience" / "please try again":
+            -- server itu busuk. Skip, backoff biar nggak kena rate limit Roblox.
+            warn(string.format("[hop] Teleport gagal (init failed) attempt %d: %s",
+                attempt, tostring(lastTeleportFailMsg)))
+            task.wait(math.min(3 + attempt * 2, 10))
+        else
+            -- Tidak ada init-failed tapi JobId nggak berubah — teleport nyangkut.
+            warn("[hop] Teleport gagal (timeout) attempt " .. attempt)
+            task.wait(2)
+        end
     end
     isTeleporting = false
     Library:Notify({ Title = "Auto Hop", Description = "All attempts failed", Time = 5 })
@@ -1112,8 +1175,26 @@ scanAllBooths = function(values, source)
         end
     end
 
-    -- ── Scan tiap booth satu per satu (open → wait → scan → next) ──
-    -- GUI booth Roblox otomatis terganti saat fire prompt booth lain
+    -- ── Tutup GUI booth yang mungkin masih terbuka dari sebelumnya ──
+    local function closeBoothGui()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if not pg then return end
+        local boothGui = pg:FindFirstChild("Booth")
+        if boothGui then
+            -- Coba destroy/hide GUI booth agar tidak carry over ke booth berikutnya
+            pcall(function()
+                local pb = boothGui:FindFirstChild("PlayersBooth")
+                if pb then pb.Enabled = false end
+            end)
+            pcall(function() boothGui.Enabled = false end)
+        end
+    end
+
+    -- Pastikan GUI bersih sebelum mulai
+    closeBoothGui()
+    task.wait(0.1)
+
+    -- ── Scan tiap booth satu per satu (open → wait → scan → close → next) ──
     for _, entry in ipairs(boothList) do
         local booth    = entry.booth
         local ownerId  = entry.ownerId
@@ -1139,7 +1220,7 @@ scanAllBooths = function(values, source)
             end
         end
 
-        -- Buka prompt booth ini, tunggu ScrollingList terisi dengan item booth ini
+        -- Buka prompt booth ini, tunggu ScrollingList terisi
         do
             local root = booth:FindFirstChild("Root")
             if root then
@@ -1154,7 +1235,11 @@ scanAllBooths = function(values, source)
             end
         end
 
-        local items = scanCurrentBooth()
+        local items    = scanCurrentBooth()
+
+        -- Tutup GUI booth ini sebelum lanjut ke booth berikutnya
+        closeBoothGui()
+        task.wait(0.05)
         local username = getUsername(ownerId)
 
         local sellerSales, sellerRap = -1, -1
