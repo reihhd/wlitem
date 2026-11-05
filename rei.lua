@@ -20,7 +20,7 @@ local BBVALUES_URL  = API_BASE .. "/bbvalues.json" -- proxy via bot (bbvalues.uk
 local VALUES_URL    = API_BASE .. "/values.json"   -- manual values dari bot
 local SCANNED_URL   = API_BASE .. "/scanned"       -- shared scanned servers (cross-account)
 local MIN_VALUE      = 100 -- hanya scan item dengan value > ini
-local DEFAULT_UNDER  = 10  -- default under deduction
+local DEFAULT_UNDER  = 20  -- default under deduction
 local HOP_SKIP_COUNT = 20
 local HOP_HISTORY_FILE = "hop_history.json"
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -844,10 +844,11 @@ for _ = 1, 5 do math.random() end
 
 -- Ambil semua halaman server dari Roblox API (pagination via cursor)
 -- Roblox membatasi 100 server per halaman; game besar bisa punya 300-500+ server
+local SERVER_POOL_TARGET = 40  -- cukup 40 server kandidat, stop fetch lebih awal
 local function getServerList()
     local servers = {}
     local cursor = nil
-    local maxPages = 5 -- ambil max 5 halaman = 500 server
+    local maxPages = 5 -- plafon aman kalau halaman awal penuh semua
 
     for page = 1, maxPages do
         local url = string.format(
@@ -875,12 +876,15 @@ local function getServerList()
             end
         end
 
+        -- Sudah dapat cukup kandidat — stop, jangan buang waktu fetch halaman lain
+        if #servers >= SERVER_POOL_TARGET then break end
+
         -- nextPageCursor nil/false = tidak ada halaman lagi
         if not data.nextPageCursor or data.nextPageCursor == "" then break end
         cursor = data.nextPageCursor
 
-        -- Jangan spam API — tunggu sebentar antar halaman
-        if page < maxPages then task.wait(0.3) end
+        -- Jeda kecil antar halaman (jarang kepakai karena early-stop di atas)
+        if page < maxPages then task.wait(0.15) end
     end
 
     print(string.format("[hop] Got %d servers total", #servers))
@@ -934,102 +938,132 @@ local function shuffleInPlace(t)
     end
 end
 
-local function pickNextServer()
-    local servers = getServerList()
-    if #servers == 0 then
-        warn("[hop] Server list kosong")
-        return nil
-    end
+-- ── Server pool (di-cache + prefetch) ──────────────────────────────────────────
+-- Daftar server di-fetch sekali, disimpan sebagai antrian jobId siap-teleport.
+-- Di-isi ulang hanya kalau habis atau sudah basi. Prefetch jalan di background
+-- saat scan berlangsung, jadi pas scan selesai hop langsung tanpa nunggu network.
+local cachedServerPool = {}      -- antrian jobId string
+local poolFetchedAt    = 0
+local poolRefreshing   = false
+local POOL_TTL         = 90      -- detik, pool dianggap basi setelah ini
 
-    -- Shuffle agar urutan benar-benar acak (tidak tergantung urutan API)
+-- Bangun antrian jobId berurut prioritas (clean -> not-scanned -> reset).
+local function buildServerPool()
+    local servers = getServerList()
+    if #servers == 0 then return {} end
     shuffleInPlace(servers)
 
     local currentJob = game.JobId
-
-    -- Pass 1: Belum di-scan dan tidak di history (prioritas tertinggi)
-    for _, s in ipairs(servers) do
-        if s.jobId ~= currentJob
-            and not isInHistory(s.jobId)
-            and not isServerScanned(s.jobId)
-        then
-            print(string.format("[hop] Pick (clean): %s", s.jobId:sub(1, 8)))
-            return s.jobId
+    local pool = {}
+    local seen = {}
+    local function push(jobId)
+        if jobId and jobId ~= currentJob and not seen[jobId] then
+            seen[jobId] = true
+            table.insert(pool, jobId)
         end
     end
 
-    -- Pass 2: Belum di-scan saja (boleh ada di history lama)
+    -- Prioritas 1: belum di-scan & tidak di history
     for _, s in ipairs(servers) do
-        if s.jobId ~= currentJob and not isServerScanned(s.jobId) then
-            print(string.format("[hop] Pick (not-scanned): %s", s.jobId:sub(1, 8)))
-            return s.jobId
-        end
+        if not isInHistory(s.jobId) and not isServerScanned(s.jobId) then push(s.jobId) end
+    end
+    -- Prioritas 2: belum di-scan (boleh di history)
+    for _, s in ipairs(servers) do
+        if not isServerScanned(s.jobId) then push(s.jobId) end
     end
 
-    -- Pass 3: Semua sudah di-scan — reset scanned cache dan ambil yang tidak di history
-    warn("[hop] Semua server sudah di-scan, reset scanned cache")
-    sharedScannedCache = {}
-    lastScannedFetch = 0
-
-    for _, s in ipairs(servers) do
-        if s.jobId ~= currentJob and not isInHistory(s.jobId) then
-            print(string.format("[hop] Pick (reset-scanned): %s", s.jobId:sub(1, 8)))
-            return s.jobId
+    if #pool == 0 then
+        -- Semua sudah di-scan — reset scanned cache, ambil yang tidak di history
+        warn("[hop] Semua server sudah di-scan, reset scanned cache")
+        sharedScannedCache = {}
+        lastScannedFetch = 0
+        for _, s in ipairs(servers) do
+            if not isInHistory(s.jobId) then push(s.jobId) end
         end
     end
-
-    -- Pass 4: Semua di history — reset history juga
-    warn("[hop] Semua server di history, reset history")
-    hopHistory = {}
-    saveHopHistory()
-
-    for _, s in ipairs(servers) do
-        if s.jobId ~= currentJob then
-            print(string.format("[hop] Pick (reset-all): %s", s.jobId:sub(1, 8)))
-            return s.jobId
-        end
+    if #pool == 0 then
+        -- Semua di history — reset history juga, ambil apa saja
+        warn("[hop] Semua server di history, reset history")
+        hopHistory = {}
+        saveHopHistory()
+        for _, s in ipairs(servers) do push(s.jobId) end
     end
 
+    return pool
+end
+
+local function refreshServerPool(force)
+    if poolRefreshing then return end
+    if not force and #cachedServerPool > 0 and (os.time() - poolFetchedAt) < POOL_TTL then
+        return
+    end
+    poolRefreshing = true
+    local ok, pool = pcall(buildServerPool)
+    if ok and pool and #pool > 0 then
+        cachedServerPool = pool
+        poolFetchedAt = os.time()
+        print(string.format("[hop] Pool refreshed: %d servers", #pool))
+    end
+    poolRefreshing = false
+end
+
+-- Panggil di background (non-blocking) — biar network overlap sama kerja lain
+local function prefetchServerPool()
+    task.spawn(function() pcall(refreshServerPool, false) end)
+end
+
+-- Ambil 1 server dari pool. Instan kalau pool sudah warm.
+local function pickNextServer()
+    local currentJob = game.JobId
+
+    for _ = 1, 2 do -- maks 2 putaran: pool lama, lalu refresh paksa
+        while #cachedServerPool > 0 do
+            local jobId = table.remove(cachedServerPool, 1)
+            if jobId and jobId ~= currentJob and not isServerScanned(jobId) then
+                print(string.format("[hop] Pick: %s (sisa pool %d)", jobId:sub(1, 8), #cachedServerPool))
+                return jobId
+            end
+        end
+        -- Pool habis — isi ulang paksa dan coba lagi
+        refreshServerPool(true)
+        if #cachedServerPool == 0 then break end
+    end
+
+    warn("[hop] Pool kosong, tidak ada server")
     return nil
 end
 
 local function doHop(reason)
     local currentJob = game.JobId
+    isTeleporting = true
+
     for attempt = 1, 5 do
-        Library:Notify({ Title = "Auto Hop", Description = string.format("%s (%d/5)", reason, attempt), Time = 2 })
+        -- Ambil server dari pool (instan kalau pool warm dari prefetch)
         local nextServer = pickNextServer()
-        if not nextServer then
-            warn("[hop] Tidak ada server ditemukan, attempt " .. attempt)
-            task.wait(3)
+        if not nextServer or nextServer == currentJob then
+            warn("[hop] Tidak ada server, attempt " .. attempt)
+            task.wait(1.5)
             continue
         end
 
-        -- Pastikan kita tidak hop ke server yang sama
-        if nextServer == currentJob then
-            warn("[hop] pickNextServer returned current server, skip")
-            task.wait(1)
-            continue
-        end
-
-        isTeleporting = true
+        Library:Notify({ Title = "Auto Hop", Description = string.format("%s (%d/5)", reason, attempt), Time = 2 })
         print(string.format("[hop] Teleporting to %s (attempt %d)", nextServer:sub(1, 8), attempt))
 
         local sent, sendErr = joinServer(nextServer)
         if not sent then
             -- Panggilan teleport ditolak langsung (rate limit / argumen salah).
-            -- Jangan hajar lagi cepat-cepat — backoff dulu.
-            isTeleporting = false
             addToHistory(nextServer)
             warn("[hop] joinServer ditolak: " .. tostring(sendErr))
-            task.wait(math.min(3 + attempt * 2, 10))
+            task.wait(math.min(2 + attempt, 6))
             continue
         end
 
-        -- Tunggu teleport. Kalau TeleportInitFailed fire di tengah, stop nunggu
-        -- lebih awal — server penuh/expired, percuma tunggu sampai habis.
+        -- Tunggu teleport. Break cepat begitu JobId berubah (sukses) atau
+        -- TeleportInitFailed fire (server busuk) — nggak buang waktu.
         local waited = 0
-        while waited < 10 do
-            task.wait(0.5)
-            waited += 0.5
+        while waited < 9 do
+            task.wait(0.4)
+            waited += 0.4
             if game.JobId ~= currentJob then break end
             if lastTeleportFailed then break end
         end
@@ -1039,21 +1073,22 @@ local function doHop(reason)
             return true
         end
 
-        isTeleporting = false
         addToHistory(nextServer)
 
         if lastTeleportFailed then
             -- "failed to connect to experience" / "please try again":
-            -- server itu busuk. Skip, backoff biar nggak kena rate limit Roblox.
+            -- server busuk. Langsung coba server lain dari pool, backoff kecil
+            -- biar nggak kena rate limit Roblox.
             warn(string.format("[hop] Teleport gagal (init failed) attempt %d: %s",
                 attempt, tostring(lastTeleportFailMsg)))
-            task.wait(math.min(3 + attempt * 2, 10))
+            task.wait(math.min(2 + attempt, 6))
         else
             -- Tidak ada init-failed tapi JobId nggak berubah — teleport nyangkut.
             warn("[hop] Teleport gagal (timeout) attempt " .. attempt)
-            task.wait(2)
+            task.wait(1.5)
         end
     end
+
     isTeleporting = false
     Library:Notify({ Title = "Auto Hop", Description = "All attempts failed", Time = 5 })
     return false
@@ -1092,8 +1127,9 @@ local function startAutoScan()
             if isServerScanned(currentJob) then
                 print("[auto] Server " .. currentJob:sub(1, 8) .. " already scanned")
                 if autoHopEnabled then
+                    prefetchServerPool()
                     doHop("Already scanned")
-                    if game.JobId == currentJob then task.wait(10) end
+                    if game.JobId == currentJob then task.wait(3) end
                 else
                     task.wait(5)
                 end
@@ -1154,6 +1190,10 @@ scanAllBooths = function(values, source)
         Library:Notify({ Title = "Error", Description = "Stands not found", Time = 5 })
         return
     end
+
+    -- Prefetch daftar server di background SELAGI scan jalan, jadi pas scan
+    -- selesai pool sudah siap dan hop langsung tanpa nunggu network.
+    if autoHopEnabled then prefetchServerPool() end
 
     local results = {}
     local boothCount, underrapCount = 0, 0
@@ -1408,7 +1448,6 @@ scanAllBooths = function(values, source)
     })
 
     if autoHopEnabled then
-        task.wait(0.5)
         doHop("Scan done, hopping")
     end
 end
