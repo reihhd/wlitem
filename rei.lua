@@ -1103,7 +1103,7 @@ scanAllBooths = function(values, source)
         tostring(PLACE_ID), currentJobId
     )
 
-    -- ── Kumpulkan semua booth dulu (non-blocking) ──
+    -- ── Kumpulkan semua booth dulu ──
     local boothList = {}
     for _, booth in ipairs(stands:GetChildren()) do
         local ownerId = booth:GetAttribute("Owner")
@@ -1112,26 +1112,26 @@ scanAllBooths = function(values, source)
         end
     end
 
-    -- ── Buka semua prompt secara bersamaan (paralel) ──
-    -- Fire semua prompt sekaligus, lalu tunggu sekali
-    for _, entry in ipairs(boothList) do
-        local booth = entry.booth
-        local root = booth:FindFirstChild("Root")
-        if root then
-            local holder = root:FindFirstChild("ProximityPromptHolder")
-            if holder then
-                local prompt = holder:FindFirstChild("BoothProximityPrompt")
-                if prompt then
-                    task.spawn(function() pcall(firePrompt, prompt) end)
-                end
-            end
+    -- ── Tutup GUI booth yang mungkin masih terbuka dari sebelumnya ──
+    local function closeBoothGui()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if not pg then return end
+        local boothGui = pg:FindFirstChild("Booth")
+        if boothGui then
+            -- Coba destroy/hide GUI booth agar tidak carry over ke booth berikutnya
+            pcall(function()
+                local pb = boothGui:FindFirstChild("PlayersBooth")
+                if pb then pb.Enabled = false end
+            end)
+            pcall(function() boothGui.Enabled = false end)
         end
     end
 
-    -- Tunggu semua booth terbuka sekaligus (satu kali wait)
-    task.wait(0.3)
+    -- Pastikan GUI bersih sebelum mulai
+    closeBoothGui()
+    task.wait(0.1)
 
-    -- ── Scan tiap booth ──
+    -- ── Scan tiap booth satu per satu (open → wait → scan → close → next) ──
     for _, entry in ipairs(boothList) do
         local booth    = entry.booth
         local ownerId  = entry.ownerId
@@ -1157,19 +1157,15 @@ scanAllBooths = function(values, source)
             end
         end
 
-        -- Buka prompt booth ini jika belum terbuka (sekunder)
+        -- Buka prompt booth ini, tunggu ScrollingList terisi
         do
             local root = booth:FindFirstChild("Root")
             if root then
                 local holder = root:FindFirstChild("ProximityPromptHolder")
                 if holder then
                     local prompt = holder:FindFirstChild("BoothProximityPrompt")
-                    -- Cek apakah ScrollingList sudah ada isinya
-                    local list = getScrollingList()
-                    local hasItems = list and #list:GetChildren() > 0
-                    if not hasItems and prompt then
+                    if prompt then
                         pcall(firePrompt, prompt)
-                        -- Tunggu maksimal 1.5s untuk booth ini
                         waitForScrollingList(1.5)
                     end
                 end
@@ -1177,6 +1173,10 @@ scanAllBooths = function(values, source)
         end
 
         local items    = scanCurrentBooth()
+
+        -- Tutup GUI booth ini sebelum lanjut ke booth berikutnya
+        closeBoothGui()
+        task.wait(0.05)
         local username = getUsername(ownerId)
 
         local sellerSales, sellerRap = -1, -1
@@ -1331,8 +1331,6 @@ scanAllBooths = function(values, source)
             end
         end
 
-        -- Yield singkat antar booth agar tidak freeze client
-        task.wait(0)
     end
 
     local output = table.concat(results, "\n")
