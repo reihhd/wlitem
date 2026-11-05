@@ -58,35 +58,51 @@ local function isInHistory(jobId)
     return false
 end
 
--- Forward declaration
+-- Forward declaration: httpGet is defined in UTILITY below, but used by the
+-- shared-scanned code here. Without this, the call hit a nil global and the
+-- shared list silently never loaded.
 local httpGet
 
 -- ── SHARED SCANNED SERVERS (via bot API — cross-account) ──────────────────────
-local sharedScannedCache = {}
+-- All 6 accounts share which servers have been scanned through the bot.
+-- A server is "scanned" for 5 minutes, then it can be scanned again.
+
+local sharedScannedCache = {} -- local cache: {jobId = timestamp (os.time)}
 local lastScannedFetch = 0
-local SCANNED_FETCH_INTERVAL = 10
-local SCANNED_LOCAL_TTL = 300
+local SCANNED_FETCH_INTERVAL = 10 -- refresh shared list every 10s
+local SCANNED_LOCAL_TTL = 300 -- 5 minutes local expiry
 
 local function fetchSharedScanned()
-    if (os.time() - lastScannedFetch) < SCANNED_FETCH_INTERVAL then return end
+    -- Throttle: don't fetch more than once per 10s
+    if (os.time() - lastScannedFetch) < SCANNED_FETCH_INTERVAL then
+        return
+    end
     local ok2, body = pcall(function()
         return httpGet(SCANNED_URL .. ".json", {})
     end)
     if not ok2 or not body then
-        lastScannedFetch = os.time()
+        lastScannedFetch = os.time() -- don't retry immediately on failure
         return
     end
     if body:sub(1, 1) == "{" then
         local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
         if ok and type(data) == "table" then
+            -- Convert bot timestamps to local os.time scale
             local now = os.time()
             local merged = {}
             for jid, ts in pairs(sharedScannedCache) do
-                if (now - ts) < SCANNED_LOCAL_TTL then merged[jid] = ts end
+                if (now - ts) < SCANNED_LOCAL_TTL then
+                    merged[jid] = ts
+                end
             end
             for jid, ts in pairs(data) do
+                -- Bot sends unix epoch timestamps; convert relative to local time
+                -- If bot timestamp is within TTL, mark as recently scanned
                 if type(ts) == "number" then
-                    if not merged[jid] then merged[jid] = now end
+                    local localTs = merged[jid]
+                    if not localTs then
+                        merged[jid] = now -- treat as "just scanned" if from bot
+                    end
                 end
             end
             sharedScannedCache = merged
@@ -96,7 +112,9 @@ local function fetchSharedScanned()
 end
 
 local function markServerScanned(jobId)
+    -- Update local cache immediately (this is what matters for hop logic)
     sharedScannedCache[jobId] = os.time()
+    -- Report to shared API in background (fire-and-forget)
     task.spawn(function()
         local json = HttpService:JSONEncode({ job_id = jobId, username = LocalPlayer.Name })
         local opts = {
@@ -111,8 +129,10 @@ local function markServerScanned(jobId)
 end
 
 local function isServerScanned(jobId)
+    -- Check local cache with TTL
     local t = sharedScannedCache[jobId]
     if not t then return false end
+    -- Expired? Remove and return false
     if (os.time() - t) >= SCANNED_LOCAL_TTL then
         sharedScannedCache[jobId] = nil
         return false
@@ -120,7 +140,7 @@ local function isServerScanned(jobId)
     return true
 end
 
--- Background refresh shared scanned list
+-- Background task to periodically refresh shared scanned list
 task.spawn(function()
     while true do
         pcall(fetchSharedScanned)
@@ -150,8 +170,7 @@ local Window = Library:CreateWindow({
 
 -- ── UTILITY ───────────────────────────────────────────────────────────────────
 
--- httpGet dengan retry otomatis dan timeout handling
-function httpGet(url, extraHeaders)
+function httpGet(url, extraHeaders)   -- assigns the forward-declared local
     local headers = {
         ["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         ["Accept"] = "application/json",
@@ -159,7 +178,6 @@ function httpGet(url, extraHeaders)
     if extraHeaders then
         for k, v in pairs(extraHeaders) do headers[k] = v end
     end
-    -- Coba request / syn.request / GetAsync — return body atau nil
     if request then
         local ok, res = pcall(request, { Url = url, Method = "GET", Headers = headers })
         if ok and res and res.Body and res.Body ~= "" then return res.Body end
@@ -170,21 +188,6 @@ function httpGet(url, extraHeaders)
     end
     local ok, body = pcall(function() return HttpService:GetAsync(url) end)
     return ok and body or nil
-end
-
--- httpPost non-blocking: fire and forget in background thread
-local function httpPostAsync(url, jsonBody)
-    task.spawn(function()
-        local opts = {
-            Url = url, Method = "POST",
-            Headers = { ["Content-Type"] = "application/json" },
-            Body = jsonBody,
-        }
-        if request then pcall(request, opts)
-        elseif syn and syn.request then pcall(syn.request, opts)
-        else pcall(function() HttpService:PostAsync(url, jsonBody) end)
-        end
-    end)
 end
 
 local function parseNumber(str)
@@ -208,21 +211,42 @@ local function getDisplayName(userId)
 end
 
 local function sendWebhook(payload)
-    httpPostAsync(WEBHOOK_URL, HttpService:JSONEncode(payload))
+    local json = HttpService:JSONEncode(payload)
+    local opts = {
+        Url = WEBHOOK_URL, Method = "POST",
+        Headers = { ["Content-Type"] = "application/json" }, Body = json,
+    }
+    if request then pcall(request, opts)
+    elseif syn and syn.request then pcall(syn.request, opts)
+    else pcall(function() HttpService:PostAsync(WEBHOOK_URL, json) end)
+    end
 end
 
 local function postScanToAPI(data)
-    httpPostAsync(SCANS_URL, HttpService:JSONEncode(data))
+    local json = HttpService:JSONEncode(data)
+    local opts = {
+        Url = SCANS_URL, Method = "POST",
+        Headers = { ["Content-Type"] = "application/json" }, Body = json,
+    }
+    if request then pcall(request, opts)
+    elseif syn and syn.request then pcall(syn.request, opts)
+    else pcall(function() HttpService:PostAsync(SCANS_URL, json) end)
+    end
 end
 
 local function sendHeartbeat()
-    httpPostAsync(HEARTBEAT_URL, HttpService:JSONEncode({
-        username = LocalPlayer.Name,
-        job_id   = game.JobId,
-    }))
+    local json = HttpService:JSONEncode({ username = LocalPlayer.Name, job_id = game.JobId })
+    local opts = {
+        Url = HEARTBEAT_URL, Method = "POST",
+        Headers = { ["Content-Type"] = "application/json" }, Body = json,
+    }
+    if request then pcall(request, opts)
+    elseif syn and syn.request then pcall(syn.request, opts)
+    else pcall(function() HttpService:PostAsync(HEARTBEAT_URL, json) end)
+    end
 end
 
--- Heartbeat loop: setiap 2 menit
+-- Heartbeat loop: send every 2 minutes
 task.spawn(function()
     while true do
         pcall(sendHeartbeat)
@@ -231,10 +255,14 @@ task.spawn(function()
 end)
 
 -- ── BBVALUES.UK API ───────────────────────────────────────────────────────────
+-- Fetch langsung dari bbvalues.uk/api/items
+-- Response: array of { id, n(name), c(category), p(price/value), r(rarity),
+--                       st(status), tg(tag), ch(change24h), a(avgPrice), f(finisher) }
+
 local BBVALUES_CACHE_FILE = "bbvalues_cache.json"
-local cachedBBValues = nil
-local lastFetchTime  = 0
-local CACHE_TTL      = 300  -- 5 menit
+local cachedBBValues = nil      -- in-memory cache
+local lastFetchTime  = 0        -- os.time() of last successful fetch
+local CACHE_TTL      = 300      -- 5 menit — pakai cache kalau masih fresh
 
 local function parseBBValuesBody(body)
     if not body or body == "" then return nil end
@@ -261,7 +289,7 @@ local function buildValuesLookup(data)
                     rarity   = item.r or "NORMAL",
                     status   = item.st or "stable",
                     tag      = item.tg or "",
-                    finisher = (item.s == "Finisher"),
+                    finisher = (item.s == "Finisher"), -- HANYA s=="Finisher", f adalah "has finisher variant"
                     source   = item.s or "None",
                     avg      = item.a or 0,
                     change   = item.ch or 0,
@@ -286,6 +314,7 @@ end
 local function saveBBValuesCache(body)
     if writefile then
         pcall(writefile, BBVALUES_CACHE_FILE, body)
+        print("[bbvalues] Cache saved to file")
     end
 end
 
@@ -302,22 +331,27 @@ local function loadBBValuesFromFile()
 end
 
 local function fetchBBValuesRaw()
+    -- Fetch via bot proxy (bbvalues.uk unreliable from Roblox executor)
     return httpGet(BBVALUES_URL, {})
 end
 
 local function loadBBValues()
-    -- 1. In-memory cache masih fresh
+    -- 1. Kalau in-memory cache masih fresh, pakai itu
     if cachedBBValues and (os.time() - lastFetchTime) < CACHE_TTL then
+        print("[bbvalues] Using in-memory cache (" .. (os.time() - lastFetchTime) .. "s old)")
         return cachedBBValues
     end
 
-    -- 2. Fetch dari API (retry singkat — jangan block lama)
+    -- 2. Coba fetch dari API (dengan retry)
     local MAX_RETRIES = 3
     local body = nil
     for attempt = 1, MAX_RETRIES do
+        print(string.format("[bbvalues] Fetch attempt %d/%d...", attempt, MAX_RETRIES))
         body = fetchBBValuesRaw()
         local data = parseBBValuesBody(body)
         if data and #data > 100 then
+            -- Berhasil! Simpan cache
+            print("[bbvalues] API fetch OK: " .. #data .. " items")
             saveBBValuesCache(body)
             local values, count = buildValuesLookup(data)
             if count > 0 then
@@ -326,38 +360,61 @@ local function loadBBValues()
                 return values
             end
         end
+        -- Gagal — log error
+        if body then
+            local preview = body:sub(1, 80):gsub("%s+", " ")
+            warn(string.format("[bbvalues] Attempt %d failed: %s", attempt, preview))
+        else
+            warn(string.format("[bbvalues] Attempt %d failed: nil response", attempt))
+        end
         if attempt < MAX_RETRIES then
-            -- Delay pendek: 1s, 2s (lebih cepat dari 3s, 6s sebelumnya)
-            task.wait(attempt)
+            local delay = attempt * 3 -- 3s, 6s
+            print("[bbvalues] Retrying in " .. delay .. "s...")
+            task.wait(delay)
         end
     end
 
-    -- 3. Fallback: expired in-memory cache
+    -- 3. API gagal semua — coba in-memory cache (meski expired)
     if cachedBBValues then
         local age = os.time() - lastFetchTime
-        warn(string.format("[bbvalues] API failed, using expired cache (%dm old)", math.floor(age / 60)))
+        warn(string.format("[bbvalues] API failed, using expired in-memory cache (%ds old)", age))
         Library:Notify({ Title = "BBValues", Description = string.format("API down, using cache (%dm old)", math.floor(age / 60)), Time = 5 })
         return cachedBBValues
     end
 
-    -- 4. Fallback: file cache
+    -- 4. Tidak ada in-memory cache — coba file cache
     local fileData = loadBBValuesFromFile()
     if fileData then
         local values, count = buildValuesLookup(fileData)
         if count > 0 then
             cachedBBValues = values
-            lastFetchTime = os.time() - CACHE_TTL + 60
-            warn("[bbvalues] Using file cache")
+            lastFetchTime = os.time() - CACHE_TTL + 60 -- mark as "almost expired" so next call retries
+            warn("[bbvalues] API failed, using file cache")
             Library:Notify({ Title = "BBValues", Description = "API down, using saved cache", Time = 5 })
             return values
         end
     end
 
+    -- 5. Benar-benar gagal
     warn("[bbvalues] All attempts failed, no cache available")
     return {}
 end
 
 -- ── CATEGORY EXCEPTION TABLE ──────────────────────────────────────────────────
+-- Item dengan nama sama tapi beda kategori di bbvalues (122 items).
+-- Format: { [lowercase_name] = { {maxPrice, category}, ... } }
+-- Diurutkan dari threshold terkecil ke terbesar.
+-- Kalau harga jual <= maxPrice → match category itu.
+-- Threshold = midpoint antara 2 variant value.
+-- Entry terakhir pakai math.huge sebagai catch-all.
+-- Data diambil dari bbvalues.uk API 2026-11-01.
+
+-- ── ASSET ID → CATEGORY MAP ───────────────────────────────────────────────────
+-- Roblox asset ID dari booth image → category.
+-- Ini lebih akurat daripada price-based matching untuk item dual/triple category.
+-- Format: { ["assetId"] = "Category" }
+-- Asset ID tanpa prefix "rbxassetid://"
+
 local ASSET_CATEGORY_MAP = {
     -- Crimson Kagune
     ["16266665378"]        = "Sword",
@@ -399,56 +456,18 @@ local ASSET_CATEGORY_MAP = {
     ["97054245713645"]     = "Emote",
 }
 
-local ASSET_MAP_FILE = "asset_map.json"
-local function _lastDigits(v)
-    v = tostring(v or "")
-    return v:match("(%d+)$")
-end
-local function loadAssetMapFile()
-    if not readfile then return end
-    local ok, content = pcall(readfile, ASSET_MAP_FILE)
-    if not ok or not content or content == "" then return end
-    local okD, data = pcall(function() return HttpService:JSONDecode(content) end)
-    if not okD or type(data) ~= "table" then
-        warn("[scanner] asset_map.json invalid JSON, ignored")
-        return
-    end
-    local added = 0
-    for k, v in pairs(data) do
-        local id, cat
-        if type(v) == "string" then
-            id, cat = _lastDigits(k), v
-        elseif type(v) == "table" then
-            id  = _lastDigits(v.asset_id or v.assetId or v.id)
-            cat = v.category or v.cat or v.type
-        end
-        if id and cat and cat ~= "" then
-            ASSET_CATEGORY_MAP[id] = cat
-            added += 1
-        end
-    end
-    if added > 0 then print(string.format("[scanner] asset_map.json: +%d asset IDs", added)) end
-end
-pcall(loadAssetMapFile)
-
-local _unknownSeen = {}
-local _unknownLines = {}
-local function logUnknownAsset(itemName, assetId, guessedCat)
-    local id = _lastDigits(assetId)
-    if not id or ASSET_CATEGORY_MAP[id] or _unknownSeen[id] then return end
-    _unknownSeen[id] = true
-    table.insert(_unknownLines, string.format("%s | %s | %s", tostring(itemName), id, tostring(guessedCat or "?")))
-    if writefile then
-        pcall(writefile, "unknown_assets.txt", table.concat(_unknownLines, "\n") .. "\n")
-    end
-end
-
+-- Resolve category dari asset ID booth image
+-- Return: matchedVariant, isUnderrap (atau nil kalau asset ID tidak dikenal)
 local function resolveByAssetId(assetId, variants, sellPrice)
     if not assetId or assetId == "" then return nil end
+    -- Strip prefix
     local id = assetId:match("(%d+)$")
     if not id then return nil end
+    
     local targetCat = ASSET_CATEGORY_MAP[id]
     if not targetCat then return nil end
+    
+    -- Cari variant bbvalues yang category-nya cocok
     for _, v in ipairs(variants) do
         if v.category == targetCat then
             local threshold = v.value - DEFAULT_UNDER
@@ -459,133 +478,138 @@ local function resolveByAssetId(assetId, variants, sellPrice)
 end
 
 local CATEGORY_EXCEPTIONS = {
-    ["astral seraph blade"]              = { { 1938, "Emote" }, { math.huge, "Sword" } },
-    ["aurora burst"]                     = { { 11, "Explosion" }, { math.huge, "Emote" } },
-    ["axolotl scythe"]                   = { { 320, "Emote" }, { math.huge, "Sword" } },
-    ["ball drop"]                        = { { 119, "Explosion" }, { math.huge, "Emote" } },
-    ["bittersweet scythe"]               = { { 493, "Emote" }, { math.huge, "Sword" } },
-    ["blue bunny scythe"]                = { { 334, "Emote" }, { math.huge, "Sword" } },
-    ["celestial dawn scythe"]            = { { 169, "Emote" }, { math.huge, "Sword" } },
-    ["celestial hero bow"]               = { { 279, "Emote" }, { math.huge, "Sword" } },
-    ["cherry blossom spear"]             = { { 423, "Emote" }, { math.huge, "Sword" } },
-    ["chrome dracula spear"]             = { { 253, "Emote" }, { math.huge, "Sword" } },
-    ["coal"]                             = { { 2, "Sword" }, { math.huge, "Explosion" } },
-    ["confetti burst"]                   = { { 4, "Explosion" }, { math.huge, "Emote" } },
-    ["corrupt blossom bow"]              = { { 249, "Emote" }, { math.huge, "Sword" } },
-    ["crimson kagune"]                   = { { 1676, "Emote" }, { math.huge, "Sword" } },
-    ["crystal ribbon scythe"]            = { { 270, "Emote" }, { math.huge, "Sword" } },
-    ["death call scythe"]                = { { 305, "Emote" }, { math.huge, "Sword" } },
-    ["deathrider"]                       = { { 5080, "Emote" }, { math.huge, "Sword" } },
-    ["deathwarden lance"]                = { { 193, "Emote" }, { math.huge, "Sword" } },
-    ["divine ruin bow"]                  = { { 190, "Emote" }, { math.huge, "Sword" } },
-    ["dual axolotl blade"]               = { { 322, "Emote" }, { math.huge, "Sword" } },
-    ["dual axolotl scythe"]              = { { 541, "Emote" }, { math.huge, "Sword" } },
-    ["dual bittersweet blade"]           = { { 493, "Emote" }, { math.huge, "Sword" } },
-    ["dual bittersweet scythe"]          = { { 536, "Emote" }, { math.huge, "Sword" } },
-    ["dual blue bunny katana"]           = { { 288, "Emote" }, { math.huge, "Sword" } },
-    ["dual blue bunny scythe"]           = { { 469, "Emote" }, { math.huge, "Sword" } },
-    ["dual celestial dawn blade"]        = { { 203, "Emote" }, { math.huge, "Sword" } },
-    ["dual celestial dawn scythe"]       = { { 244, "Emote" }, { math.huge, "Sword" } },
-    ["dual celestial hero blade"]        = { { 317, "Emote" }, { math.huge, "Sword" } },
-    ["dual cherry blossom blade"]        = { { 214, "Emote" }, { math.huge, "Sword" } },
-    ["dual corrupt blossom blade"]       = { { 204, "Emote" }, { math.huge, "Sword" } },
-    ["dual crystal ribbon scythe"]       = { { 340, "Emote" }, { math.huge, "Sword" } },
-    ["dual death call blade"]            = { { 184, "Emote" }, { math.huge, "Sword" } },
-    ["dual death call scythe"]           = { { 337, "Emote" }, { math.huge, "Sword" } },
-    ["dual deathwarden blade"]           = { { 175, "Emote" }, { math.huge, "Sword" } },
-    ["dual electro katana"]              = { { 136, "Emote" }, { math.huge, "Sword" } },
-    ["dual flashback butterfly blade"]   = { { 195, "Emote" }, { math.huge, "Sword" } },
-    ["dual flashback butterfly scythe"]  = { { 353, "Emote" }, { math.huge, "Sword" } },
-    ["dual gothic bunny blade"]          = { { 374, "Emote" }, { math.huge, "Sword" } },
-    ["dual gothic bunny scythe"]         = { { 545, "Emote" }, { math.huge, "Sword" } },
-    ["dual gothic heartpiercer blade"]   = { { 211, "Emote" }, { math.huge, "Sword" } },
-    ["dual hazy katana"]                 = { { 247, "Emote" }, { math.huge, "Sword" } },
-    ["dual hazy scythe"]                 = { { 471, "Emote" }, { math.huge, "Sword" } },
-    ["dual hidden beast blade"]          = { { 149, "Emote" }, { math.huge, "Sword" } },
-    ["dual hidden beast scythe"]         = { { 304, "Emote" }, { math.huge, "Sword" } },
-    ["dual jade blade"]                  = { { 122, "Emote" }, { math.huge, "Sword" } },
-    ["dual jade scythe"]                 = { { 201, "Emote" }, { math.huge, "Sword" } },
-    ["dual luv4pain blade"]              = { { 286, "Emote" }, { math.huge, "Sword" } },
-    ["dual luv4pain scythe"]             = { { 386, "Emote" }, { math.huge, "Sword" } },
-    ["dual masked horror blade"]         = { { 146, "Emote" }, { math.huge, "Sword" } },
-    ["dual masked horror scythe"]        = { { 223, "Emote" }, { math.huge, "Sword" } },
-    ["dual moon cycle scythe"]           = { { 223, "Emote" }, { math.huge, "Sword" } },
-    ["dual moonlight blade"]             = { { 144, "Emote" }, { math.huge, "Sword" } },
-    ["dual neo-neko katana"]             = { { 476, "Emote" }, { math.huge, "Sword" } },
-    ["dual primordial blade"]            = { { 142, "Emote" }, { math.huge, "Sword" } },
-    ["dual prince legacy scythe"]        = { { 373, "Emote" }, { math.huge, "Sword" } },
-    ["dual prismatic gem blade"]         = { { 174, "Emote" }, { math.huge, "Sword" } },
-    ["dual prismatic gem scythe"]        = { { 220, "Emote" }, { math.huge, "Sword" } },
-    ["dual radiant duckling kunai"]      = { { 199, "Emote" }, { math.huge, "Sword" } },
-    ["dual reborn wings blade"]          = { { 221, "Emote" }, { math.huge, "Sword" } },
-    ["dual riftflare blade"]             = { { 207, "Emote" }, { math.huge, "Sword" } },
-    ["dual royal relic blade"]           = { { 114, "Emote" }, { math.huge, "Sword" } },
-    ["dual silk divinity blade"]         = { { 175, "Emote" }, { math.huge, "Sword" } },
-    ["dual spring saber"]                = { { 183, "Emote" }, { math.huge, "Sword" } },
-    ["dual spring scythe"]               = { { 205, "Emote" }, { math.huge, "Sword" } },
-    ["dual starfish blade"]              = { { 162, "Emote" }, { math.huge, "Sword" } },
-    ["dual starfish scythe"]             = { { 277, "Emote" }, { math.huge, "Sword" } },
-    ["dual strawberry cake blade"]       = { { 207, "Emote" }, { math.huge, "Sword" } },
-    ["dual sugarcoated saber"]           = { { 689, "Emote" }, { math.huge, "Sword" } },
-    ["dual verdant thorn blade"]         = { { 881, "Sword" }, { math.huge, "Emote" } },
-    ["dual y2k blade"]                   = { { 434, "Emote" }, { math.huge, "Sword" } },
-    ["electro bow"]                      = { { 196, "Emote" }, { math.huge, "Sword" } },
-    ["elemental"]                        = { { 26, "Explosion" }, { math.huge, "Emote" } },
-    ["ethereal bombardment"]             = { { 1435, "Explosion" }, { math.huge, "Sword" } },
-    ["event horizon"]                    = { { 328, "Sword" }, { math.huge, "Emote" } },
-    ["flashback butterfly scythe"]       = { { 155, "Emote" }, { math.huge, "Sword" } },
-    ["ghostly vengeance"]                = { { 79, "Explosion" }, { math.huge, "Sword" } },
-    ["giant egg"]                        = { { 504, "Emote" }, { math.huge, "Explosion" } },
-    ["gothic bunny scythe"]              = { { 245, "Emote" }, { math.huge, "Sword" } },
-    ["gothic heartpiercer bow"]          = { { 237, "Emote" }, { math.huge, "Sword" } },
-    ["gravelight"]                       = { { 2502, "Emote" }, { math.huge, "Sword" } },
-    ["guardian of the underworld"]       = { { 2109, "Explosion" }, { math.huge, "Sword" } },
-    ["gyaru katana"]                     = { { 2620, "Emote" }, { math.huge, "Sword" } },
-    ["hazy scythe"]                      = { { 182, "Emote" }, { math.huge, "Sword" } },
-    ["hidden beast scythe"]              = { { 173, "Emote" }, { math.huge, "Sword" } },
-    ["higanbana katana"]                 = { { 2494, "Emote" }, { math.huge, "Sword" } },
-    ["high noon"]                        = { { 8, "Explosion" }, { math.huge, "Emote" } },
-    ["jade scythe"]                      = { { 162, "Emote" }, { math.huge, "Sword" } },
-    ["luv4pain scythe"]                  = { { 163, "Emote" }, { math.huge, "Sword" } },
-    ["masked horror scythe"]             = { { 192, "Emote" }, { math.huge, "Sword" } },
-    ["moon cycle scythe"]                = { { 154, "Emote" }, { math.huge, "Sword" } },
-    ["moonlight bow"]                    = { { 223, "Emote" }, { math.huge, "Sword" } },
-    ["nebula blade"]                     = { { 642, "Explosion" }, { math.huge, "Sword" } },
-    ["neo-neko needle"]                  = { { 469, "Emote" }, { math.huge, "Sword" } },
-    ["night raver"]                      = { { 2383, "Emote" }, { 6161, "Explosion" }, { math.huge, "Sword" } },
-    ["phantom ops"]                      = { { 2403, "Emote" }, { math.huge, "Sword" } },
-    ["phantom pact"]                     = { { 548, "Explosion" }, { 5720, "Emote" }, { math.huge, "Sword" } },
-    ["primordial lance"]                 = { { 164, "Emote" }, { math.huge, "Sword" } },
-    ["prince legacy scythe"]             = { { 201, "Emote" }, { math.huge, "Sword" } },
-    ["prismatic gem scythe"]             = { { 166, "Emote" }, { math.huge, "Sword" } },
-    ["proyection sorcery katana"]        = { { 1981, "Emote" }, { math.huge, "Sword" } },
-    ["radiant duckling lance"]           = { { 224, "Emote" }, { math.huge, "Sword" } },
-    ["reborn wings bow"]                 = { { 335, "Emote" }, { math.huge, "Sword" } },
-    ["red moon katana"]                  = { { 1914, "Emote" }, { math.huge, "Sword" } },
-    ["regret blades"]                    = { { 10887, "Emote" }, { math.huge, "Sword" } },
-    ["riftflare katana"]                 = { { 1762, "Explosion" }, { math.huge, "Sword" } },
-    ["riftflare lance"]                  = { { 313, "Emote" }, { math.huge, "Sword" } },
-    ["royal relic bow"]                  = { { 135, "Emote" }, { math.huge, "Sword" } },
-    ["sea turtle"]                       = { { 6182, "Emote" }, { math.huge, "Sword" } },
-    ["silk divinity bow"]                = { { 178, "Emote" }, { math.huge, "Sword" } },
-    ["snow globe"]                       = { { 24, "Emote" }, { math.huge, "Explosion" } },
-    ["spring scythe"]                    = { { 162, "Emote" }, { math.huge, "Sword" } },
-    ["starfall"]                         = { { 2525002, "Explosion" }, { math.huge, "Sword" } },
-    ["starfish scythe"]                  = { { 225, "Emote" }, { math.huge, "Sword" } },
-    ["starlit halo wings"]               = { { 7993, "Emote" }, { math.huge, "Sword" } },
-    ["strawberry cake lance"]            = { { 238, "Emote" }, { math.huge, "Sword" } },
-    ["sugarcoated bow"]                  = { { 380, "Emote" }, { math.huge, "Sword" } },
-    ["thronebreaker"]                    = { { 4020, "Explosion" }, { math.huge, "Sword" } },
-    ["verdant thorn lance"]              = { { 208, "Emote" }, { math.huge, "Sword" } },
-    ["volcanic surge"]                   = { { 5, "Explosion" }, { math.huge, "Sword" } },
-    ["widowbloom bow"]                   = { { 227, "Emote" }, { math.huge, "Sword" } },
-    ["wolf greatsword"]                  = { { 8283, "Emote" }, { math.huge, "Sword" } },
-    ["y2k bow"]                          = { { 396, "Emote" }, { math.huge, "Sword" } },
+    ["astral seraph blade"]              = { { 1938, "Emote" }, { math.huge, "Sword" } },       -- E=162 S=3714
+    ["aurora burst"]                     = { { 11, "Explosion" }, { math.huge, "Emote" } },     -- X=9 E=12
+    ["axolotl scythe"]                   = { { 320, "Emote" }, { math.huge, "Sword" } },        -- E=71 S=569
+    ["ball drop"]                        = { { 119, "Explosion" }, { math.huge, "Emote" } },    -- X=27 E=210
+    ["bittersweet scythe"]               = { { 493, "Emote" }, { math.huge, "Sword" } },        -- E=300 S=686
+    ["blue bunny scythe"]                = { { 334, "Emote" }, { math.huge, "Sword" } },        -- E=116 S=552
+    ["celestial dawn scythe"]            = { { 169, "Emote" }, { math.huge, "Sword" } },        -- E=67 S=271
+    ["celestial hero bow"]               = { { 279, "Emote" }, { math.huge, "Sword" } },        -- E=181 S=377
+    ["cherry blossom spear"]             = { { 423, "Emote" }, { math.huge, "Sword" } },        -- E=143 S=703
+    ["chrome dracula spear"]             = { { 253, "Emote" }, { math.huge, "Sword" } },        -- E=87 S=419
+    ["coal"]                             = { { 2, "Sword" }, { math.huge, "Explosion" } },      -- S=0 X=4
+    ["confetti burst"]                   = { { 4, "Explosion" }, { math.huge, "Emote" } },      -- X=4 E=4
+    ["corrupt blossom bow"]              = { { 249, "Emote" }, { math.huge, "Sword" } },        -- E=78 S=419
+    ["crimson kagune"]                   = { { 1676, "Emote" }, { math.huge, "Sword" } },       -- E=151 S=3200
+    ["crystal ribbon scythe"]            = { { 270, "Emote" }, { math.huge, "Sword" } },        -- E=131 S=409
+    ["death call scythe"]                = { { 305, "Emote" }, { math.huge, "Sword" } },        -- E=50 S=560
+    ["deathrider"]                       = { { 5080, "Emote" }, { math.huge, "Sword" } },       -- E=548 S=9611
+    ["deathwarden lance"]                = { { 193, "Emote" }, { math.huge, "Sword" } },        -- E=46 S=339
+    ["divine ruin bow"]                  = { { 190, "Emote" }, { math.huge, "Sword" } },        -- E=127 S=253
+    ["dual axolotl blade"]               = { { 322, "Emote" }, { math.huge, "Sword" } },        -- E=52 S=591
+    ["dual axolotl scythe"]              = { { 541, "Emote" }, { math.huge, "Sword" } },        -- E=115 S=966
+    ["dual bittersweet blade"]           = { { 493, "Emote" }, { math.huge, "Sword" } },        -- E=450 S=536
+    ["dual bittersweet scythe"]          = { { 536, "Emote" }, { math.huge, "Sword" } },        -- E=525 S=546
+    ["dual blue bunny katana"]           = { { 288, "Emote" }, { math.huge, "Sword" } },        -- E=89 S=486
+    ["dual blue bunny scythe"]           = { { 469, "Emote" }, { math.huge, "Sword" } },        -- E=92 S=846
+    ["dual celestial dawn blade"]        = { { 203, "Emote" }, { math.huge, "Sword" } },        -- E=50 S=355
+    ["dual celestial dawn scythe"]       = { { 244, "Emote" }, { math.huge, "Sword" } },        -- E=45 S=443
+    ["dual celestial hero blade"]        = { { 317, "Emote" }, { math.huge, "Sword" } },        -- E=207 S=427
+    ["dual cherry blossom blade"]        = { { 214, "Emote" }, { math.huge, "Sword" } },        -- E=75 S=353
+    ["dual corrupt blossom blade"]       = { { 204, "Emote" }, { math.huge, "Sword" } },        -- E=67 S=341
+    ["dual crystal ribbon scythe"]       = { { 340, "Emote" }, { math.huge, "Sword" } },        -- E=74 S=606
+    ["dual death call blade"]            = { { 184, "Emote" }, { math.huge, "Sword" } },        -- E=96 S=271
+    ["dual death call scythe"]           = { { 337, "Emote" }, { math.huge, "Sword" } },        -- E=90 S=584
+    ["dual deathwarden blade"]           = { { 175, "Emote" }, { math.huge, "Sword" } },        -- E=61 S=289
+    ["dual electro katana"]              = { { 136, "Emote" }, { math.huge, "Sword" } },        -- E=52 S=220
+    ["dual flashback butterfly blade"]   = { { 195, "Emote" }, { math.huge, "Sword" } },        -- E=51 S=339
+    ["dual flashback butterfly scythe"]  = { { 353, "Emote" }, { math.huge, "Sword" } },        -- E=51 S=655
+    ["dual gothic bunny blade"]          = { { 374, "Emote" }, { math.huge, "Sword" } },        -- E=147 S=600
+    ["dual gothic bunny scythe"]         = { { 545, "Emote" }, { math.huge, "Sword" } },        -- E=121 S=969
+    ["dual gothic heartpiercer blade"]   = { { 211, "Emote" }, { math.huge, "Sword" } },        -- E=90 S=331
+    ["dual hazy katana"]                 = { { 247, "Emote" }, { math.huge, "Sword" } },        -- E=76 S=417
+    ["dual hazy scythe"]                 = { { 471, "Emote" }, { math.huge, "Sword" } },        -- E=122 S=820
+    ["dual hidden beast blade"]          = { { 149, "Emote" }, { math.huge, "Sword" } },        -- E=78 S=220
+    ["dual hidden beast scythe"]         = { { 304, "Emote" }, { math.huge, "Sword" } },        -- E=118 S=489
+    ["dual jade blade"]                  = { { 122, "Emote" }, { math.huge, "Sword" } },        -- E=27 S=216
+    ["dual jade scythe"]                 = { { 201, "Emote" }, { math.huge, "Sword" } },        -- E=53 S=349
+    ["dual luv4pain blade"]              = { { 286, "Emote" }, { math.huge, "Sword" } },        -- E=71 S=500
+    ["dual luv4pain scythe"]             = { { 386, "Emote" }, { math.huge, "Sword" } },        -- E=101 S=671
+    ["dual masked horror blade"]         = { { 146, "Emote" }, { math.huge, "Sword" } },        -- E=60 S=232
+    ["dual masked horror scythe"]        = { { 223, "Emote" }, { math.huge, "Sword" } },        -- E=72 S=373
+    ["dual moon cycle scythe"]           = { { 223, "Emote" }, { math.huge, "Sword" } },        -- E=83 S=362
+    ["dual moonlight blade"]             = { { 144, "Emote" }, { math.huge, "Sword" } },        -- E=59 S=228
+    ["dual neo-neko katana"]             = { { 476, "Emote" }, { math.huge, "Sword" } },        -- E=168 S=784
+    ["dual primordial blade"]            = { { 142, "Emote" }, { math.huge, "Sword" } },        -- E=65 S=218
+    ["dual prince legacy scythe"]        = { { 373, "Emote" }, { math.huge, "Sword" } },        -- E=147 S=598
+    ["dual prismatic gem blade"]         = { { 174, "Emote" }, { math.huge, "Sword" } },        -- E=88 S=259
+    ["dual prismatic gem scythe"]        = { { 220, "Emote" }, { math.huge, "Sword" } },        -- E=65 S=375
+    ["dual radiant duckling kunai"]      = { { 199, "Emote" }, { math.huge, "Sword" } },        -- E=44 S=354
+    ["dual reborn wings blade"]          = { { 221, "Emote" }, { math.huge, "Sword" } },        -- E=81 S=360
+    ["dual riftflare blade"]             = { { 207, "Emote" }, { math.huge, "Sword" } },        -- E=90 S=324
+    ["dual royal relic blade"]           = { { 114, "Emote" }, { math.huge, "Sword" } },        -- E=54 S=174
+    ["dual silk divinity blade"]         = { { 175, "Emote" }, { math.huge, "Sword" } },        -- E=65 S=285
+    ["dual spring saber"]                = { { 183, "Emote" }, { math.huge, "Sword" } },        -- E=46 S=319
+    ["dual spring scythe"]               = { { 205, "Emote" }, { math.huge, "Sword" } },        -- E=69 S=341
+    ["dual starfish blade"]              = { { 162, "Emote" }, { math.huge, "Sword" } },        -- E=70 S=253
+    ["dual starfish scythe"]             = { { 277, "Emote" }, { math.huge, "Sword" } },        -- E=60 S=494
+    ["dual strawberry cake blade"]       = { { 207, "Emote" }, { math.huge, "Sword" } },        -- E=92 S=322
+    ["dual sugarcoated saber"]           = { { 689, "Emote" }, { math.huge, "Sword" } },        -- E=497 S=881
+    ["dual verdant thorn blade"]         = { { 881, "Sword" }, { math.huge, "Emote" } },        -- S=640 E=1121
+    ["dual y2k blade"]                   = { { 434, "Emote" }, { math.huge, "Sword" } },        -- E=124 S=744
+    ["electro bow"]                      = { { 196, "Emote" }, { math.huge, "Sword" } },        -- E=66 S=325
+    ["elemental"]                        = { { 26, "Explosion" }, { math.huge, "Emote" } },     -- X=25 E=27
+    ["ethereal bombardment"]             = { { 1435, "Explosion" }, { math.huge, "Sword" } },   -- X=352 S=2518
+    ["event horizon"]                    = { { 328, "Sword" }, { math.huge, "Emote" } },        -- S=7 E=648
+    ["flashback butterfly scythe"]       = { { 155, "Emote" }, { math.huge, "Sword" } },        -- E=35 S=275
+    ["ghostly vengeance"]                = { { 79, "Explosion" }, { math.huge, "Sword" } },     -- X=68 S=89
+    ["giant egg"]                        = { { 504, "Emote" }, { math.huge, "Explosion" } },    -- E=9 X=999
+    ["gothic bunny scythe"]              = { { 245, "Emote" }, { math.huge, "Sword" } },        -- E=66 S=423
+    ["gothic heartpiercer bow"]          = { { 237, "Emote" }, { math.huge, "Sword" } },        -- E=111 S=362
+    ["gravelight"]                       = { { 2502, "Emote" }, { math.huge, "Sword" } },       -- E=317 S=4687
+    ["guardian of the underworld"]       = { { 2109, "Explosion" }, { math.huge, "Sword" } },   -- X=236 S=3981
+    ["gyaru katana"]                     = { { 2620, "Emote" }, { math.huge, "Sword" } },       -- E=252 S=4987
+    ["hazy scythe"]                      = { { 182, "Emote" }, { math.huge, "Sword" } },        -- E=57 S=306
+    ["hidden beast scythe"]              = { { 173, "Emote" }, { math.huge, "Sword" } },        -- E=72 S=273
+    ["higanbana katana"]                 = { { 2494, "Emote" }, { math.huge, "Sword" } },       -- E=318 S=4669
+    ["high noon"]                        = { { 8, "Explosion" }, { math.huge, "Emote" } },      -- X=3 E=12
+    ["jade scythe"]                      = { { 162, "Emote" }, { math.huge, "Sword" } },        -- E=37 S=287
+    ["luv4pain scythe"]                  = { { 163, "Emote" }, { math.huge, "Sword" } },        -- E=61 S=265
+    ["masked horror scythe"]             = { { 192, "Emote" }, { math.huge, "Sword" } },        -- E=146 S=238
+    ["moon cycle scythe"]                = { { 154, "Emote" }, { math.huge, "Sword" } },        -- E=69 S=238
+    ["moonlight bow"]                    = { { 223, "Emote" }, { math.huge, "Sword" } },        -- E=56 S=390
+    ["nebula blade"]                     = { { 642, "Explosion" }, { math.huge, "Sword" } },    -- X=39 S=1244
+    ["neo-neko needle"]                  = { { 469, "Emote" }, { math.huge, "Sword" } },        -- E=129 S=809
+    ["night raver"]                      = { { 2383, "Emote" }, { 6161, "Explosion" }, { math.huge, "Sword" } }, -- E=1766 X=2999 S=9323
+    ["phantom ops"]                      = { { 2403, "Emote" }, { math.huge, "Sword" } },       -- E=205 S=4600
+    ["phantom pact"]                     = { { 548, "Explosion" }, { 5720, "Emote" }, { math.huge, "Sword" } }, -- X=547 E=548 S=10892
+    ["primordial lance"]                 = { { 164, "Emote" }, { math.huge, "Sword" } },        -- E=74 S=253
+    ["prince legacy scythe"]             = { { 201, "Emote" }, { math.huge, "Sword" } },        -- E=121 S=280
+    ["prismatic gem scythe"]             = { { 166, "Emote" }, { math.huge, "Sword" } },        -- E=92 S=240
+    ["proyection sorcery katana"]        = { { 1981, "Emote" }, { math.huge, "Sword" } },       -- E=172 S=3789
+    ["radiant duckling lance"]           = { { 224, "Emote" }, { math.huge, "Sword" } },        -- E=92 S=355
+    ["reborn wings bow"]                 = { { 335, "Emote" }, { math.huge, "Sword" } },        -- E=141 S=528
+    ["red moon katana"]                  = { { 1914, "Emote" }, { math.huge, "Sword" } },       -- E=584 S=3243
+    ["regret blades"]                    = { { 10887, "Emote" }, { math.huge, "Sword" } },      -- E=540 S=21234
+    ["riftflare katana"]                 = { { 1762, "Explosion" }, { math.huge, "Sword" } },   -- X=321 S=3202
+    ["riftflare lance"]                  = { { 313, "Emote" }, { math.huge, "Sword" } },        -- E=104 S=521
+    ["royal relic bow"]                  = { { 135, "Emote" }, { math.huge, "Sword" } },        -- E=45 S=225
+    ["sea turtle"]                       = { { 6182, "Emote" }, { math.huge, "Sword" } },       -- E=1446 S=10917
+    ["silk divinity bow"]                = { { 178, "Emote" }, { math.huge, "Sword" } },        -- E=69 S=286
+    ["snow globe"]                       = { { 24, "Emote" }, { math.huge, "Explosion" } },     -- E=5 X=43
+    ["spring scythe"]                    = { { 162, "Emote" }, { math.huge, "Sword" } },        -- E=56 S=267
+    ["starfall"]                         = { { 2525002, "Explosion" }, { math.huge, "Sword" } }, -- X=4 S=5050000
+    ["starfish scythe"]                  = { { 225, "Emote" }, { math.huge, "Sword" } },        -- E=183 S=266
+    ["starlit halo wings"]               = { { 7993, "Emote" }, { math.huge, "Sword" } },       -- E=2604 S=13382
+    ["strawberry cake lance"]            = { { 238, "Emote" }, { math.huge, "Sword" } },        -- E=80 S=395
+    ["sugarcoated bow"]                  = { { 380, "Emote" }, { math.huge, "Sword" } },        -- E=177 S=582
+    ["thronebreaker"]                    = { { 4020, "Explosion" }, { math.huge, "Sword" } },   -- X=4 S=8036
+    ["verdant thorn lance"]              = { { 208, "Emote" }, { math.huge, "Sword" } },        -- E=178 S=237
+    ["volcanic surge"]                   = { { 5, "Explosion" }, { math.huge, "Sword" } },      -- X=2 S=8
+    ["widowbloom bow"]                   = { { 227, "Emote" }, { math.huge, "Sword" } },        -- E=54 S=399
+    ["wolf greatsword"]                  = { { 8283, "Emote" }, { math.huge, "Sword" } },       -- E=1985 S=14581
+    ["y2k bow"]                          = { { 396, "Emote" }, { math.huge, "Sword" } },        -- E=129 S=662
 }
 
+-- ── Resolve category exception ───────────────────────────────────────────────
+-- Kalau item ada di exception table, langsung match category berdasarkan harga.
+-- Return: matchedVariant, isUnderrap  (atau nil jika tidak ada di tabel / variant tidak ditemukan)
 local function resolveException(itemName, variants, sellPrice)
     local exc = CATEGORY_EXCEPTIONS[string.lower(itemName)]
     if not exc then return nil end
+
+    -- Cari category yang cocok berdasarkan harga jual
     local targetCat = nil
     for _, rule in ipairs(exc) do
         if sellPrice <= rule[1] then
@@ -594,29 +618,55 @@ local function resolveException(itemName, variants, sellPrice)
         end
     end
     if not targetCat then return nil end
+
+    -- Cari variant bbvalues yang category-nya cocok
     for _, v in ipairs(variants) do
         if v.category == targetCat then
             local threshold = v.value - DEFAULT_UNDER
             return v, sellPrice <= threshold
         end
     end
-    return nil
+    return nil -- variant tidak ditemukan (seharusnya tidak terjadi)
 end
 
+-- Analisis smart variant matching
+-- 
+-- Fakta dari bbvalues.uk API:
+--   s = "Finisher"  → item ini ADALAH versi finisher (contoh: Frog Finisher = 2.5M)
+--   s = "None"      → item ini bukan finisher (contoh: Frog biasa = 1M)
+--   f = true/false  → item ini PUNYA variant finisher (bukan berarti item ini finisher!)
+--
+-- Di booth Blade Ball:
+--   Frame.Finisher.Visible = true  → item yang dijual adalah versi finisher
+--   Frame.Finisher.Visible = false → item yang dijual bukan finisher
+--
+-- Strategi matching:
+--   1. Kalau booth punya finisher → cari variant dengan s="Finisher"
+--   2. Kalau booth TIDAK punya finisher → cari variant dengan s!="Finisher"
+--   3. Kalau ada multiple variant non-finisher (beda category: Sword/Emote/Explosion)
+--      → cek harga jual, cocokkan ke variant yang value-nya paling dekat
+--   4. Hanya report underrap kalau harga jual di bawah SEMUA variant yang cocok
+
 local function analyzeItem(itemName, variants, hasFinisher, sellPrice, assetId)
-    if not sellPrice then return nil, false end
+    if not sellPrice then
+        return nil, false
+    end
 
-    -- Step 0a: Asset ID (paling akurat)
+    -- Step 0a: Cek asset ID dulu (paling akurat — langsung dari booth image)
     local assetVariant, assetUnderrap = resolveByAssetId(assetId, variants, sellPrice)
-    if assetVariant then return assetVariant, assetUnderrap end
+    if assetVariant then
+        return assetVariant, assetUnderrap
+    end
 
-    -- Step 0b: Exception table (price-based)
+    -- Step 0b: Fallback ke exception table (price-based matching)
     local excVariant, excUnderrap = resolveException(itemName, variants, sellPrice)
-    if excVariant then return excVariant, excUnderrap end
+    if excVariant then
+        return excVariant, excUnderrap
+    end
 
-    -- Step 1: Filter berdasarkan finisher status
-    local finisherMatch = {}
-    local finisherOther = {}
+    -- Step 1: Filter berdasarkan finisher status booth
+    local finisherMatch = {}   -- variant yang cocok finisher status
+    local finisherOther = {}   -- variant yang beda finisher status
     for _, v in ipairs(variants) do
         if v.finisher == hasFinisher then
             table.insert(finisherMatch, v)
@@ -624,49 +674,80 @@ local function analyzeItem(itemName, variants, hasFinisher, sellPrice, assetId)
             table.insert(finisherOther, v)
         end
     end
+
+    -- Pool utama: yang cocok finisher status, fallback ke semua
     local pool = #finisherMatch > 0 and finisherMatch or variants
 
-    -- Step 2: Satu variant — langsung cek
+    -- Step 2: Kalau cuma 1 variant di pool, langsung cek underrap
     if #pool == 1 then
         local v = pool[1]
         local threshold = v.value - DEFAULT_UNDER
         local isUnderrap = sellPrice <= threshold
+
+        -- Safety: cek apakah harga jual cocok dengan variant LAIN (beda finisher/category)
         if isUnderrap then
             for _, other in ipairs(finisherOther) do
                 local low  = other.value - DEFAULT_UNDER
                 local high = other.value * 1.5
                 if sellPrice >= low and sellPrice <= high then
-                    return other, false
+                    return other, false -- harga cocok variant lain, bukan underrap
                 end
             end
         end
+
         return v, isUnderrap
     end
 
-    -- Step 3: Multiple variant — proximity matching
+    -- Step 3: Multiple variant di pool (beda category: Sword/Emote/Explosion)
+    -- 
+    -- CATEGORY EXCEPTION RULES:
+    --   Banyak item punya nama sama tapi beda category & harga:
+    --     "Crimson Kagune" → Sword 2500, Emote 300
+    --     "Frog"           → Sword 1000, Finisher 2500000
+    --     "Galaxy"         → Sword 5000, Explosion 3000
+    --   
+    --   Strategi: 
+    --   A) Kalau harga jual DEKAT dengan salah satu variant → match variant itu
+    --   B) Kalau harga jual JAUH dari semua → cek apakah di bawah variant TERMURAH
+    --   C) Explicit category grouping: group by source type (s field)
+    --      untuk memastikan Sword vs Emote vs Explosion vs Finisher tidak tercampur
+
+    -- Group variants by category for better analysis
     local categoryGroups = {}
     for _, v in ipairs(pool) do
         local cat = v.category or "unknown"
-        if not categoryGroups[cat] then categoryGroups[cat] = {} end
+        if not categoryGroups[cat] then
+            categoryGroups[cat] = {}
+        end
         table.insert(categoryGroups[cat], v)
     end
+
+    -- Count distinct categories
     local catCount = 0
     for _ in pairs(categoryGroups) do catCount += 1 end
 
+    -- If multiple categories exist, use price-proximity matching
+    -- This handles: Sword 2500 vs Emote 300 — sell at 250 → match Emote
     local closestVariant = nil
     local closestDiff = math.huge
-    local closestRatio = math.huge
+    local closestRatio = math.huge -- ratio = |sellPrice - value| / value
 
     for _, v in ipairs(pool) do
         local diff = math.abs(v.value - sellPrice)
-        local ratio = diff / math.max(v.value, 1)
+        local ratio = diff / math.max(v.value, 1) -- normalized distance
+        
+        -- Prefer ratio-based matching for multi-category items
+        -- This prevents: sell 1000, Sword=2500 (diff=1500), Emote=300 (diff=700)
+        -- from matching Emote when it's actually a Sword being sold cheap
         if catCount > 1 then
+            -- Use ratio: closer percentage-wise wins
             if ratio < closestRatio then
                 closestRatio = ratio
                 closestDiff = diff
                 closestVariant = v
             end
         else
+            -- Single category: use absolute diff
             if diff < closestDiff then
                 closestDiff = diff
                 closestVariant = v
@@ -674,6 +755,7 @@ local function analyzeItem(itemName, variants, hasFinisher, sellPrice, assetId)
         end
     end
 
+    -- Also check variants outside pool (different finisher status)
     for _, v in ipairs(finisherOther) do
         local diff = math.abs(v.value - sellPrice)
         local ratio = diff / math.max(v.value, 1)
@@ -691,48 +773,72 @@ local function analyzeItem(itemName, variants, hasFinisher, sellPrice, assetId)
         end
     end
 
+    -- Check if sell price is within reasonable range of closest variant
     if closestVariant then
         local low  = closestVariant.value - DEFAULT_UNDER
         local high = closestVariant.value * 1.5
         if sellPrice >= low and sellPrice <= high then
-            return closestVariant, false
+            return closestVariant, false -- harga wajar untuk variant ini
         end
     end
 
-    -- Step 4: Cek underrap terhadap variant termurah
+    -- Step 4: Harga jual tidak dekat dengan variant manapun
+    -- Cek apakah underrap terhadap variant TERMURAH di pool
     local cheapest = pool[1]
     for i = 2, #pool do
-        if pool[i].value < cheapest.value then cheapest = pool[i] end
+        if pool[i].value < cheapest.value then
+            cheapest = pool[i]
+        end
     end
+
     local threshold = cheapest.value - DEFAULT_UNDER
     local isUnderrap = sellPrice <= threshold
+
+    -- Final safety: cek semua variant (termasuk beda finisher)
+    -- Gunakan range yang lebih ketat untuk multi-category
     if isUnderrap then
         for _, v in ipairs(variants) do
             local rangeLow = v.value * (catCount > 1 and 0.6 or 0.5)
             local rangeHigh = v.value * 1.5
             if sellPrice >= rangeLow and sellPrice <= rangeHigh then
-                return v, false
+                return v, false -- harga masuk range wajar variant ini
             end
         end
     end
+
     return cheapest, isUnderrap
 end
 
--- ── MANUAL VALUES ─────────────────────────────────────────────────────────────
+-- ── MANUAL VALUES (dari Bot) ──────────────────────────────────────────────────
+-- Format: { items: { "ItemName": { value, category, finisher, under, disabled } } }
+
 local function loadManualValues()
     print("[manual] Fetching: " .. VALUES_URL)
     local body = httpGet(VALUES_URL, {})
-    if not body then warn("[manual] httpGet returned nil") return {} end
-    if body:sub(1, 1) ~= "{" then warn("[manual] Response is not JSON") return {} end
+    if not body then
+        warn("[manual] httpGet returned nil")
+        return {}
+    end
+    if body:sub(1, 1) ~= "{" then
+        warn("[manual] Response is not JSON: " .. body:sub(1, 80))
+        return {}
+    end
     local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
-    if not ok then warn("[manual] JSONDecode failed") return {} end
-    if not data or not data.items then warn("[manual] No 'items' field") return {} end
+    if not ok then
+        warn("[manual] JSONDecode failed: " .. tostring(data))
+        return {}
+    end
+    if not data or not data.items then
+        warn("[manual] No 'items' field")
+        return {}
+    end
     local values = {}
     local count = 0
     for k, v in pairs(data.items) do
         if not v.disabled or v.disabled == 0 then
             local val = v.value
             if val and val > MIN_VALUE then
+                -- Keys from /values.json may be "Name" or "Name|fin"
                 local rawName = v.name or k:gsub("|fin$", "")
                 local fin = v.finisher == true or v.finisher == 1
                 local key = string.lower(rawName)
@@ -748,7 +854,7 @@ local function loadManualValues()
                     avg      = 0,
                     change   = 0,
                     itemId   = "",
-                    underThreshold = underThreshold,
+                    underThreshold = underThreshold, -- custom under dari bot
                 }
                 if not values[key] then
                     values[key] = { entry }
@@ -789,18 +895,6 @@ local function getScrollingList()
     return pb:FindFirstChild("ScrollingList")
 end
 
--- Tunggu ScrollingList muncul dengan timeout
-local function waitForScrollingList(timeoutSec)
-    timeoutSec = timeoutSec or 1.5
-    local t0 = tick()
-    while (tick() - t0) < timeoutSec do
-        local list = getScrollingList()
-        if list and #list:GetChildren() > 0 then return list end
-        task.wait(0.05)
-    end
-    return getScrollingList()
-end
-
 local function scanCurrentBooth()
     local list = getScrollingList()
     if not list then return {} end
@@ -814,10 +908,13 @@ local function scanCurrentBooth()
             if nl and (nl:IsA("TextLabel") or nl:IsA("TextBox")) then itemName = nl.Text end
             local fin = frame:FindFirstChild("Finisher")
             if fin and fin:IsA("GuiObject") then hasFinisher = fin.Visible end
+            -- Extract image asset ID from Frame.Vector
             local vec = frame:FindFirstChild("Vector")
             if vec and (vec:IsA("ImageLabel") or vec:IsA("ImageButton")) then
                 local img = vec.Image
-                if img and img ~= "" then assetId = img end
+                if img and img ~= "" then
+                    assetId = img
+                end
             end
         end
         local bb = entry:FindFirstChild("BuyButton")
@@ -837,258 +934,74 @@ end
 
 -- ── SERVER HOP ────────────────────────────────────────────────────────────────
 
--- Seed math.random sekali pakai waktu + tick agar benar-benar beda tiap session
-math.randomseed(os.time() + math.floor(tick() * 1000) % 100000)
--- Buang beberapa angka pertama (LCG warm-up)
-for _ = 1, 5 do math.random() end
-
--- Ambil semua halaman server dari Roblox API (pagination via cursor)
--- Roblox membatasi 100 server per halaman; game besar bisa punya 300-500+ server
-local SERVER_POOL_TARGET = 40  -- cukup 40 server kandidat, stop fetch lebih awal
 local function getServerList()
+    local url = string.format(
+        "https://games.roblox.com/v1/games/%d/servers/Public?limit=100", PLACE_ID
+    )
+    local body = httpGet(url)
+    if not body then return {} end
+    local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+    if not ok or not data or not data.data then return {} end
     local servers = {}
-    local cursor = nil
-    local maxPages = 5 -- plafon aman kalau halaman awal penuh semua
-
-    for page = 1, maxPages do
-        local url = string.format(
-            "https://games.roblox.com/v1/games/%d/servers/Public?limit=100&sortOrder=Asc",
-            PLACE_ID
-        )
-        if cursor then
-            url = url .. "&cursor=" .. HttpService:UrlEncode(cursor)
-        end
-
-        local body = httpGet(url)
-        if not body then break end
-
-        local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
-        if not ok or not data or not data.data then break end
-
-        for _, s in ipairs(data.data) do
-            -- Hanya ambil server yang tidak penuh (ada slot kosong)
-            if s.id and s.playing and s.maxPlayers and s.playing < s.maxPlayers then
-                table.insert(servers, {
-                    jobId      = s.id,
-                    players    = s.playing,
-                    maxPlayers = s.maxPlayers,
-                })
-            end
-        end
-
-        -- Sudah dapat cukup kandidat — stop, jangan buang waktu fetch halaman lain
-        if #servers >= SERVER_POOL_TARGET then break end
-
-        -- nextPageCursor nil/false = tidak ada halaman lagi
-        if not data.nextPageCursor or data.nextPageCursor == "" then break end
-        cursor = data.nextPageCursor
-
-        -- Jeda kecil antar halaman (jarang kepakai karena early-stop di atas)
-        if page < maxPages then task.wait(0.15) end
+    for _, s in ipairs(data.data) do
+        table.insert(servers, { jobId = s.id, players = s.playing, maxPlayers = s.maxPlayers })
     end
-
-    print(string.format("[hop] Got %d servers total", #servers))
     return servers
 end
 
--- Flag yang di-set TeleportInitFailed kalau teleport gagal di sisi Roblox
-local lastTeleportFailed    = false
-local lastTeleportFailMsg   = nil
-
--- Listen sekali: kalau Roblox gagal init teleport ("failed to connect to
--- experience", "please try again", server penuh/expired, rate limit, dll)
--- event ini yang fire — bukan error dari pemanggilan TeleportToPlaceInstance.
-do
-    local ok = pcall(function()
-        TeleportService.TeleportInitFailed:Connect(function(player, result, message)
-            if player ~= LocalPlayer then return end
-            lastTeleportFailed  = true
-            lastTeleportFailMsg = string.format("%s: %s", tostring(result), tostring(message))
-            warn("[hop] TeleportInitFailed -> " .. lastTeleportFailMsg)
-        end)
-    end)
-    if not ok then
-        warn("[hop] Gagal connect TeleportInitFailed (executor block?)")
-    end
-end
-
--- return: ok(bool), errMsg(string|nil)
--- ok=true berarti panggilan teleport diterima Roblox (belum tentu sampai) —
--- doHop tetap cek game.JobId + lastTeleportFailed untuk konfirmasi.
 local function joinServer(jobId)
     addToHistory(game.JobId)
-    lastTeleportFailed  = false
-    lastTeleportFailMsg = nil
-
-    local ok, err = pcall(function()
-        TeleportService:TeleportToPlaceInstance(PLACE_ID, jobId, LocalPlayer)
-    end)
-    if not ok then
-        warn("[hop] TeleportToPlaceInstance error: " .. tostring(err))
-        return false, tostring(err)
-    end
-    return true, nil
+    TeleportService:TeleportToPlaceInstance(PLACE_ID, jobId, LocalPlayer)
 end
 
--- Fisher-Yates shuffle dengan seed yang sudah di-randomize
-local function shuffleInPlace(t)
-    for i = #t, 2, -1 do
-        local j = math.random(i)
-        t[i], t[j] = t[j], t[i]
-    end
-end
-
--- ── Server pool (di-cache + prefetch) ──────────────────────────────────────────
--- Daftar server di-fetch sekali, disimpan sebagai antrian jobId siap-teleport.
--- Di-isi ulang hanya kalau habis atau sudah basi. Prefetch jalan di background
--- saat scan berlangsung, jadi pas scan selesai hop langsung tanpa nunggu network.
-local cachedServerPool = {}      -- antrian jobId string
-local poolFetchedAt    = 0
-local poolRefreshing   = false
-local POOL_TTL         = 90      -- detik, pool dianggap basi setelah ini
-
--- Bangun antrian jobId berurut prioritas (clean -> not-scanned -> reset).
-local function buildServerPool()
-    local servers = getServerList()
-    if #servers == 0 then return {} end
-    shuffleInPlace(servers)
-
-    local currentJob = game.JobId
-    local pool = {}
-    local seen = {}
-    local function push(jobId)
-        if jobId and jobId ~= currentJob and not seen[jobId] then
-            seen[jobId] = true
-            table.insert(pool, jobId)
-        end
-    end
-
-    -- Prioritas 1: belum di-scan & tidak di history
-    for _, s in ipairs(servers) do
-        if not isInHistory(s.jobId) and not isServerScanned(s.jobId) then push(s.jobId) end
-    end
-    -- Prioritas 2: belum di-scan (boleh di history)
-    for _, s in ipairs(servers) do
-        if not isServerScanned(s.jobId) then push(s.jobId) end
-    end
-
-    if #pool == 0 then
-        -- Semua sudah di-scan — reset scanned cache, ambil yang tidak di history
-        warn("[hop] Semua server sudah di-scan, reset scanned cache")
-        sharedScannedCache = {}
-        lastScannedFetch = 0
-        for _, s in ipairs(servers) do
-            if not isInHistory(s.jobId) then push(s.jobId) end
-        end
-    end
-    if #pool == 0 then
-        -- Semua di history — reset history juga, ambil apa saja
-        warn("[hop] Semua server di history, reset history")
-        hopHistory = {}
-        saveHopHistory()
-        for _, s in ipairs(servers) do push(s.jobId) end
-    end
-
-    return pool
-end
-
-local function refreshServerPool(force)
-    if poolRefreshing then return end
-    if not force and #cachedServerPool > 0 and (os.time() - poolFetchedAt) < POOL_TTL then
-        return
-    end
-    poolRefreshing = true
-    local ok, pool = pcall(buildServerPool)
-    if ok and pool and #pool > 0 then
-        cachedServerPool = pool
-        poolFetchedAt = os.time()
-        print(string.format("[hop] Pool refreshed: %d servers", #pool))
-    end
-    poolRefreshing = false
-end
-
--- Panggil di background (non-blocking) — biar network overlap sama kerja lain
-local function prefetchServerPool()
-    task.spawn(function() pcall(refreshServerPool, false) end)
-end
-
--- Ambil 1 server dari pool. Instan kalau pool sudah warm.
 local function pickNextServer()
-    local currentJob = game.JobId
-
-    for _ = 1, 2 do -- maks 2 putaran: pool lama, lalu refresh paksa
-        while #cachedServerPool > 0 do
-            local jobId = table.remove(cachedServerPool, 1)
-            if jobId and jobId ~= currentJob and not isServerScanned(jobId) then
-                print(string.format("[hop] Pick: %s (sisa pool %d)", jobId:sub(1, 8), #cachedServerPool))
-                return jobId
-            end
-        end
-        -- Pool habis — isi ulang paksa dan coba lagi
-        refreshServerPool(true)
-        if #cachedServerPool == 0 then break end
+    local servers = getServerList()
+    if #servers == 0 then return nil end
+    for i = #servers, 2, -1 do
+        local j = math.random(i)
+        servers[i], servers[j] = servers[j], servers[i]
     end
-
-    warn("[hop] Pool kosong, tidak ada server")
+    local currentJob = game.JobId
+    for _, s in ipairs(servers) do
+        if s.jobId ~= currentJob and not isInHistory(s.jobId) and not isServerScanned(s.jobId) then
+            return s.jobId
+        end
+    end
+    for _, s in ipairs(servers) do
+        if s.jobId ~= currentJob and not isInHistory(s.jobId) then
+            return s.jobId
+        end
+    end
+    warn("[hop] All servers in history, resetting")
+    hopHistory = {}
+    saveHopHistory()
+    for _, s in ipairs(servers) do
+        if s.jobId ~= currentJob then return s.jobId end
+    end
     return nil
 end
 
 local function doHop(reason)
     local currentJob = game.JobId
-    isTeleporting = true
-
     for attempt = 1, 5 do
-        -- Ambil server dari pool (instan kalau pool warm dari prefetch)
-        local nextServer = pickNextServer()
-        if not nextServer or nextServer == currentJob then
-            warn("[hop] Tidak ada server, attempt " .. attempt)
-            task.wait(1.5)
-            continue
-        end
-
         Library:Notify({ Title = "Auto Hop", Description = string.format("%s (%d/5)", reason, attempt), Time = 2 })
-        print(string.format("[hop] Teleporting to %s (attempt %d)", nextServer:sub(1, 8), attempt))
-
-        local sent, sendErr = joinServer(nextServer)
-        if not sent then
-            -- Panggilan teleport ditolak langsung (rate limit / argumen salah).
-            addToHistory(nextServer)
-            warn("[hop] joinServer ditolak: " .. tostring(sendErr))
-            task.wait(math.min(2 + attempt, 6))
+        local nextServer = pickNextServer()
+        if not nextServer then
+            warn("[hop] No server found, attempt " .. attempt)
+            task.wait(3)
             continue
         end
-
-        -- Tunggu teleport. Break cepat begitu JobId berubah (sukses) atau
-        -- TeleportInitFailed fire (server busuk) — nggak buang waktu.
-        local waited = 0
-        while waited < 9 do
-            task.wait(0.4)
-            waited += 0.4
-            if game.JobId ~= currentJob then break end
-            if lastTeleportFailed then break end
-        end
-
+        isTeleporting = true
+        joinServer(nextServer)
+        task.wait(6)
         if game.JobId ~= currentJob then
-            print("[hop] Teleport berhasil!")
             return true
         end
-
+        isTeleporting = false
         addToHistory(nextServer)
-
-        if lastTeleportFailed then
-            -- "failed to connect to experience" / "please try again":
-            -- server busuk. Langsung coba server lain dari pool, backoff kecil
-            -- biar nggak kena rate limit Roblox.
-            warn(string.format("[hop] Teleport gagal (init failed) attempt %d: %s",
-                attempt, tostring(lastTeleportFailMsg)))
-            task.wait(math.min(2 + attempt, 6))
-        else
-            -- Tidak ada init-failed tapi JobId nggak berubah — teleport nyangkut.
-            warn("[hop] Teleport gagal (timeout) attempt " .. attempt)
-            task.wait(1.5)
-        end
+        warn("[hop] Teleport failed attempt " .. attempt)
+        task.wait(1)
     end
-
     isTeleporting = false
     Library:Notify({ Title = "Auto Hop", Description = "All attempts failed", Time = 5 })
     return false
@@ -1099,9 +1012,10 @@ end
 local autoHopEnabled  = true
 local autoScanEnabled = true
 local autoScanThread  = nil
-local scanMode        = "auto"
+local scanMode        = "auto" -- "auto" (bbvalues), "manual" (bot), "both"
 
-local lastUnderrapInfo = nil
+-- Last joined underrap info (untuk ditampilkan di GUI)
+local lastUnderrapInfo = nil -- { item, price, realValue, seller, category, finisher, jobId }
 
 local function stopAutoScan()
     if autoScanThread then
@@ -1118,6 +1032,7 @@ local function startAutoScan()
         while scanAllBooths == nil do task.wait(0.1) end
         while autoScanEnabled do
             if isTeleporting then
+                print("[auto] Teleporting, skipping scan")
                 task.wait(2)
                 continue
             end
@@ -1127,15 +1042,17 @@ local function startAutoScan()
             if isServerScanned(currentJob) then
                 print("[auto] Server " .. currentJob:sub(1, 8) .. " already scanned")
                 if autoHopEnabled then
-                    prefetchServerPool()
                     doHop("Already scanned")
-                    if game.JobId == currentJob then task.wait(3) end
+                    if game.JobId == currentJob then
+                        task.wait(10)
+                    end
                 else
                     task.wait(5)
                 end
                 continue
             end
 
+            -- Scan berdasarkan mode
             local didScan = false
 
             if scanMode == "auto" or scanMode == "both" then
@@ -1160,24 +1077,28 @@ local function startAutoScan()
                 end
             end
 
-            if not didScan then task.wait(5) end
-            if autoScanEnabled and not autoHopEnabled then task.wait(2) end
+            if not didScan then
+                task.wait(5)
+            end
+
+            if autoScanEnabled and not autoHopEnabled then
+                task.wait(2)
+            end
         end
     end)
 end
 
 scanAllBooths = function(values, source)
     source = source or "auto"
-
     if isTeleporting then
-        print("[scanner] Skipping — teleporting")
+        print("[scanner] Skipping scan — teleporting")
         return
     end
 
     local currentJobId = game.JobId
 
     if isServerScanned(currentJobId) then
-        print("[scanner] Server already scanned, skipping")
+        print("[scanner] Server " .. currentJobId:sub(1, 8) .. " already scanned, skipping")
         return
     end
 
@@ -1191,10 +1112,6 @@ scanAllBooths = function(values, source)
         return
     end
 
-    -- Prefetch daftar server di background SELAGI scan jalan, jadi pas scan
-    -- selesai pool sudah siap dan hop langsung tanpa nunggu network.
-    if autoHopEnabled then prefetchServerPool() end
-
     local results = {}
     local boothCount, underrapCount = 0, 0
     local joinLink = string.format(
@@ -1206,50 +1123,21 @@ scanAllBooths = function(values, source)
         tostring(PLACE_ID), currentJobId
     )
 
-    -- ── Kumpulkan semua booth dulu ──
-    local boothList = {}
     for _, booth in ipairs(stands:GetChildren()) do
         local ownerId = booth:GetAttribute("Owner")
-        if ownerId ~= nil then
-            table.insert(boothList, { booth = booth, ownerId = ownerId })
-        end
-    end
-
-    -- ── Tutup GUI booth yang mungkin masih terbuka dari sebelumnya ──
-    local function closeBoothGui()
-        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        if not pg then return end
-        local boothGui = pg:FindFirstChild("Booth")
-        if boothGui then
-            -- Coba destroy/hide GUI booth agar tidak carry over ke booth berikutnya
-            pcall(function()
-                local pb = boothGui:FindFirstChild("PlayersBooth")
-                if pb then pb.Enabled = false end
-            end)
-            pcall(function() boothGui.Enabled = false end)
-        end
-    end
-
-    -- Pastikan GUI bersih sebelum mulai
-    closeBoothGui()
-    task.wait(0.1)
-
-    -- ── Scan tiap booth satu per satu (open → wait → scan → close → next) ──
-    for _, entry in ipairs(boothList) do
-        local booth    = entry.booth
-        local ownerId  = entry.ownerId
+        if ownerId == nil then continue end
         boothCount += 1
 
-        -- Ambil posisi booth
+        -- Ambil posisi booth (dikirim ke API sebagai loc_x/y/z)
         local boothX, boothY, boothZ = 0, 0, 0
         do
             local pos
             local okPivot = pcall(function() pos = booth:GetPivot().Position end)
             if (not okPivot or not pos) then
-                local root = booth:FindFirstChild("Root")
-                if root and root:IsA("BasePart") then pos = root.Position end
-                if not pos and root then
-                    local anyPart = root:FindFirstChildWhichIsA("BasePart", true)
+                local r = booth:FindFirstChild("Root")
+                if r and r:IsA("BasePart") then pos = r.Position end
+                if not pos and r then
+                    local anyPart = r:FindFirstChildWhichIsA("BasePart", true)
                     if anyPart then pos = anyPart.Position end
                 end
             end
@@ -1260,28 +1148,18 @@ scanAllBooths = function(values, source)
             end
         end
 
-        -- Buka prompt booth ini, tunggu ScrollingList terisi
-        do
-            local root = booth:FindFirstChild("Root")
-            if root then
-                local holder = root:FindFirstChild("ProximityPromptHolder")
-                if holder then
-                    local prompt = holder:FindFirstChild("BoothProximityPrompt")
-                    if prompt then
-                        pcall(firePrompt, prompt)
-                        waitForScrollingList(1.5)
-                    end
-                end
-            end
+        local prompt = nil
+        local root = booth:FindFirstChild("Root")
+        if root then
+            local holder = root:FindFirstChild("ProximityPromptHolder")
+            if holder then prompt = holder:FindFirstChild("BoothProximityPrompt") end
         end
+        if prompt then firePrompt(prompt) task.wait(0.1) end
 
         local items    = scanCurrentBooth()
-
-        -- Tutup GUI booth ini sebelum lanjut ke booth berikutnya
-        closeBoothGui()
-        task.wait(0.05)
         local username = getUsername(ownerId)
 
+        -- Read seller's leaderstats (Sales & RAP) if they're in the server
         local sellerSales, sellerRap = -1, -1
         do
             local sellerPlayer = Players:GetPlayerByUserId(ownerId)
@@ -1305,12 +1183,15 @@ scanAllBooths = function(values, source)
             local variants  = values[key]
             if not variants then continue end
 
+            -- Analisis smart: cek apakah harga jual cocok dengan variant manapun
             local sellPrice = parseNumber(item.price)
             local variantCount = #variants
             local valueData, isUnderrap
 
             if source == "manual" then
+                -- Manual mode: pakai under threshold dari bot
                 if not sellPrice then continue end
+                -- Find the variant matching the booth's finisher status
                 valueData = nil
                 for _, v in ipairs(variants) do
                     if v.finisher == (item.finisher and true or false) then
@@ -1318,21 +1199,17 @@ scanAllBooths = function(values, source)
                         break
                     end
                 end
-                if not valueData then valueData = variants[1] end
+                if not valueData then valueData = variants[1] end -- fallback
                 local threshold = valueData.underThreshold or (valueData.value - DEFAULT_UNDER)
                 isUnderrap = sellPrice <= threshold
             else
+                -- Auto mode: pakai smart variant matching (with exception table)
                 valueData, isUnderrap = analyzeItem(item.name, variants, item.finisher, sellPrice, item.assetId)
             end
-            if not valueData then continue end
-
+            if not valueData then continue end -- tidak bisa parse harga
             local realValue = valueData.value
             local category  = valueData.category
             local rarity    = valueData.rarity
-
-            if variantCount > 1 and item.assetId and item.assetId ~= "" then
-                logUnknownAsset(item.name, item.assetId, category)
-            end
 
             table.insert(results, string.format(
                 "%s | Price: %s | Value: %s | Cat: %s | Rarity: %s%s%s%s",
@@ -1346,6 +1223,7 @@ scanAllBooths = function(values, source)
                 underrapCount += 1
                 local profit = realValue - sellPrice
                 local pctOff = math.floor((1 - sellPrice / realValue) * 100)
+                local sourceLabel = source == "manual" and "Manual" or "BBValues"
                 local variantNote = ""
                 if variantCount > 1 then
                     local cats = {}
@@ -1359,9 +1237,7 @@ scanAllBooths = function(values, source)
                         tostring(realValue))
                 end
                 local itemImage = string.format("https://bbvalues.uk/images/items/%s.webp", valueData.itemId or "")
-
-                -- Kirim webhook + API secara async (tidak block scanning)
-                local webhookPayload = {
+                sendWebhook({
                     embeds = {{
                         title = "Underrap Found",
                         description = string.format("**%s** selling **%d%%** below value!%s", item.name, pctOff, variantNote),
@@ -1389,31 +1265,8 @@ scanAllBooths = function(values, source)
                         footer = { text = "imaginemeandyou | by rei" },
                         timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
                     }},
-                }
-                sendWebhook(webhookPayload) -- async via httpPostAsync
-
-                local scanPayload = {
-                    item_name    = item.name,
-                    price        = sellPrice or 0,
-                    real_value   = realValue,
-                    seller       = username,
-                    display_name = getDisplayName(ownerId) or username,
-                    seller_id    = ownerId,
-                    sales        = item.sellerSales or -1,
-                    rap          = item.sellerRap or -1,
-                    finisher     = item.finisher and 1 or 0,
-                    category     = category,
-                    profit       = profit,
-                    job_id       = currentJobId,
-                    place_id     = PLACE_ID,
-                    loc_x        = boothX,
-                    loc_y        = boothY,
-                    loc_z        = boothZ,
-                    source       = source,
-                }
-                postScanToAPI(scanPayload) -- async via httpPostAsync
-
-                -- Update GUI
+                })
+                -- Simpan info underrap terakhir untuk ditampilkan di GUI
                 lastUnderrapInfo = {
                     item      = item.name,
                     price     = tostring(item.price),
@@ -1424,6 +1277,7 @@ scanAllBooths = function(values, source)
                     profit    = tostring(profit),
                     jobId     = currentJobId,
                 }
+                -- Update GUI labels
                 if lastJoinedLabels then
                     lastJoinedLabels.item:SetText("📦 Item: " .. item.name .. (item.finisher and " ✨" or ""))
                     lastJoinedLabels.seller:SetText("👤 Seller: " .. username)
@@ -1431,9 +1285,32 @@ scanAllBooths = function(values, source)
                     lastJoinedLabels.value:SetText("💎 Value: " .. tostring(realValue))
                     lastJoinedLabels.profit:SetText("📈 Profit: +" .. tostring(profit))
                 end
+
+                postScanToAPI({
+                    item_name  = item.name,
+                    price      = sellPrice or 0,
+                    real_value = realValue,
+                    seller     = username,
+                    display_name = getDisplayName(ownerId) or username,
+                    seller_id  = ownerId,
+                    sales      = item.sellerSales or -1,
+                    rap        = item.sellerRap or -1,
+                    finisher   = item.finisher and 1 or 0,
+                    category   = category,
+                    profit     = profit,
+                    job_id     = currentJobId,
+                    place_id   = PLACE_ID,
+                    loc_x      = boothX,
+                    loc_y      = boothY,
+                    loc_z      = boothZ,
+                    source     = source, -- "manual" or "auto"
+                })
+                task.wait(0.1)
             end
         end
 
+        task.wait(0)
+        table.insert(results, "")
     end
 
     local output = table.concat(results, "\n")
@@ -1448,6 +1325,7 @@ scanAllBooths = function(values, source)
     })
 
     if autoHopEnabled then
+        task.wait(0.5)
         doHop("Scan done, hopping")
     end
 end
@@ -1491,25 +1369,34 @@ MainGroup:AddButton({
     Func = function()
         task.spawn(function()
             Library:Notify({ Title = "Refresh", Description = "Fetching values...", Time = 2 })
+
             local bbCount = 0
             local manualCount = 0
-            -- Force refresh BBValues
+
+            -- Force refresh BBValues (clear cache)
             cachedBBValues = nil
             lastFetchTime = 0
             local bbVals = loadBBValues()
             if bbVals and next(bbVals) then
-                for _, variants in pairs(bbVals) do bbCount += #variants end
+                for _, variants in pairs(bbVals) do
+                    bbCount += #variants
+                end
             end
-            -- Force refresh Manual
+
+            -- Force refresh Manual values
             local manVals = loadManualValues()
             if manVals and next(manVals) then
-                for _, variants in pairs(manVals) do manualCount += #variants end
+                for _, variants in pairs(manVals) do
+                    manualCount += #variants
+                end
             end
-            -- Allow re-scan current server
+
+            -- Also clear local scanned cache so current server can be re-scanned with new values
             local currentJob = game.JobId
             if sharedScannedCache[currentJob] then
                 sharedScannedCache[currentJob] = nil
             end
+
             Library:Notify({
                 Title = "Refresh Complete",
                 Description = string.format("BBValues: %d | Manual: %d", bbCount, manualCount),
@@ -1617,7 +1504,9 @@ LastJoinedGroup:AddButton({
             Description = string.format("%s by %s", lastUnderrapInfo.item, lastUnderrapInfo.seller),
             Time = 3,
         })
-        task.spawn(function() joinServer(jobId) end)
+        task.spawn(function()
+            joinServer(jobId)
+        end)
     end,
     Tooltip = "Teleport ke server underrap terakhir",
 })
@@ -1668,7 +1557,9 @@ ServerGroup:AddButton({
     Text = "Hop to Random Server",
     Func = function()
         Library:Notify({ Title = "Hopping...", Description = "Finding server...", Time = 3 })
-        task.spawn(function() doHop("Manual hop") end)
+        task.spawn(function()
+            doHop("Manual hop")
+        end)
     end,
     Tooltip = string.format("Skip last %d servers", HOP_SKIP_COUNT),
 })
@@ -1704,12 +1595,13 @@ SaveManager:SetFolder("BoothScannerBBV")
 SaveManager:BuildConfigSection(Tabs.UISett)
 ThemeManager:ApplyToTab(Tabs.UISett)
 
+-- Apply custom dark minimalist theme (matching C++ dashboard)
 ThemeManager:ApplyThemeData({
-    FontColor       = "f5f5f6",
-    MainColor       = "111113",
-    AccentColor     = "4ade80",
-    BackgroundColor = "0c0c0e",
-    OutlineColor    = "1c1c1f",
+    FontColor       = "f5f5f6",  -- TextHigh: near-white
+    MainColor       = "111113",  -- slightly above pure black
+    AccentColor     = "4ade80",  -- SuccessFg: green accent
+    BackgroundColor = "0c0c0e",  -- Bg: near-black
+    OutlineColor    = "1c1c1f",  -- subtle border
     BackgroundImage = "",
 })
 
@@ -1719,7 +1611,7 @@ SaveManager:LoadAutoloadConfig()
 
 loadHopHistory()
 
--- Auto re-execute setelah teleport
+-- ── QUEUE ON TELEPORT (auto re-execute after hop) ─────────────────────────────
 if queue_on_teleport then
     pcall(function()
         local src = nil
@@ -1727,7 +1619,9 @@ if queue_on_teleport then
             local ok, content = pcall(readfile, "main.luau")
             if ok and content and content ~= "" then src = content end
         end
-        if not src then src = 'loadstring(readfile("main.luau"))()' end
+        if not src then
+            src = 'loadstring(readfile("main.luau"))()'
+        end
         queue_on_teleport(src)
         print("[init] Queued script for re-execution on teleport")
     end)
@@ -1745,11 +1639,7 @@ if game.PlaceId ~= ROOT_PLACE_ID then
     return
 end
 
-Library:Notify({
-    Title = "BBValues Scanner",
-    Description = string.format("Loaded (min value: %d) — Auto Scan + Hop ON", MIN_VALUE),
-    Time = 4,
-})
+Library:Notify({ Title = "BBValues Scanner", Description = string.format("Loaded (min value: %d) — Auto Scan + Hop ON", MIN_VALUE), Time = 4 })
 
 task.spawn(function()
     task.wait(1)
