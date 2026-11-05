@@ -1112,26 +1112,8 @@ scanAllBooths = function(values, source)
         end
     end
 
-    -- ── Tutup GUI booth yang mungkin masih terbuka dari sebelumnya ──
-    local function closeBoothGui()
-        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        if not pg then return end
-        local boothGui = pg:FindFirstChild("Booth")
-        if boothGui then
-            -- Coba destroy/hide GUI booth agar tidak carry over ke booth berikutnya
-            pcall(function()
-                local pb = boothGui:FindFirstChild("PlayersBooth")
-                if pb then pb.Enabled = false end
-            end)
-            pcall(function() boothGui.Enabled = false end)
-        end
-    end
-
-    -- Pastikan GUI bersih sebelum mulai
-    closeBoothGui()
-    task.wait(0.1)
-
-    -- ── Scan tiap booth satu per satu (open → wait → scan → close → next) ──
+    -- ── Scan tiap booth satu per satu (open → wait → scan → next) ──
+    -- GUI booth Roblox otomatis terganti saat fire prompt booth lain
     for _, entry in ipairs(boothList) do
         local booth    = entry.booth
         local ownerId  = entry.ownerId
@@ -1157,7 +1139,7 @@ scanAllBooths = function(values, source)
             end
         end
 
-        -- Buka prompt booth ini, tunggu ScrollingList terisi
+        -- Buka prompt booth ini, tunggu ScrollingList terisi dengan item booth ini
         do
             local root = booth:FindFirstChild("Root")
             if root then
@@ -1172,11 +1154,7 @@ scanAllBooths = function(values, source)
             end
         end
 
-        local items    = scanCurrentBooth()
-
-        -- Tutup GUI booth ini sebelum lanjut ke booth berikutnya
-        closeBoothGui()
-        task.wait(0.05)
+        local items = scanCurrentBooth()
         local username = getUsername(ownerId)
 
         local sellerSales, sellerRap = -1, -1
