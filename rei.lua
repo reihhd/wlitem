@@ -837,18 +837,53 @@ end
 
 -- ── SERVER HOP ────────────────────────────────────────────────────────────────
 
+-- Seed math.random sekali pakai waktu + tick agar benar-benar beda tiap session
+math.randomseed(os.time() + math.floor(tick() * 1000) % 100000)
+-- Buang beberapa angka pertama (LCG warm-up)
+for _ = 1, 5 do math.random() end
+
+-- Ambil semua halaman server dari Roblox API (pagination via cursor)
+-- Roblox membatasi 100 server per halaman; game besar bisa punya 300-500+ server
 local function getServerList()
-    local url = string.format(
-        "https://games.roblox.com/v1/games/%d/servers/Public?limit=100", PLACE_ID
-    )
-    local body = httpGet(url)
-    if not body then return {} end
-    local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
-    if not ok or not data or not data.data then return {} end
     local servers = {}
-    for _, s in ipairs(data.data) do
-        table.insert(servers, { jobId = s.id, players = s.playing, maxPlayers = s.maxPlayers })
+    local cursor = nil
+    local maxPages = 5 -- ambil max 5 halaman = 500 server
+
+    for page = 1, maxPages do
+        local url = string.format(
+            "https://games.roblox.com/v1/games/%d/servers/Public?limit=100&sortOrder=Asc",
+            PLACE_ID
+        )
+        if cursor then
+            url = url .. "&cursor=" .. HttpService:UrlEncode(cursor)
+        end
+
+        local body = httpGet(url)
+        if not body then break end
+
+        local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+        if not ok or not data or not data.data then break end
+
+        for _, s in ipairs(data.data) do
+            -- Hanya ambil server yang tidak penuh (ada slot kosong)
+            if s.id and s.playing and s.maxPlayers and s.playing < s.maxPlayers then
+                table.insert(servers, {
+                    jobId      = s.id,
+                    players    = s.playing,
+                    maxPlayers = s.maxPlayers,
+                })
+            end
+        end
+
+        -- nextPageCursor nil/false = tidak ada halaman lagi
+        if not data.nextPageCursor or data.nextPageCursor == "" then break end
+        cursor = data.nextPageCursor
+
+        -- Jangan spam API — tunggu sebentar antar halaman
+        if page < maxPages then task.wait(0.3) end
     end
+
+    print(string.format("[hop] Got %d servers total", #servers))
     return servers
 end
 
@@ -857,33 +892,69 @@ local function joinServer(jobId)
     TeleportService:TeleportToPlaceInstance(PLACE_ID, jobId, LocalPlayer)
 end
 
+-- Fisher-Yates shuffle dengan seed yang sudah di-randomize
+local function shuffleInPlace(t)
+    for i = #t, 2, -1 do
+        local j = math.random(i)
+        t[i], t[j] = t[j], t[i]
+    end
+end
+
 local function pickNextServer()
     local servers = getServerList()
-    if #servers == 0 then return nil end
-    -- Fisher-Yates shuffle
-    for i = #servers, 2, -1 do
-        local j = math.random(i)
-        servers[i], servers[j] = servers[j], servers[i]
+    if #servers == 0 then
+        warn("[hop] Server list kosong")
+        return nil
     end
+
+    -- Shuffle agar urutan benar-benar acak (tidak tergantung urutan API)
+    shuffleInPlace(servers)
+
     local currentJob = game.JobId
-    -- Prioritas: belum di-scan & tidak di history
+
+    -- Pass 1: Belum di-scan dan tidak di history (prioritas tertinggi)
     for _, s in ipairs(servers) do
-        if s.jobId ~= currentJob and not isInHistory(s.jobId) and not isServerScanned(s.jobId) then
+        if s.jobId ~= currentJob
+            and not isInHistory(s.jobId)
+            and not isServerScanned(s.jobId)
+        then
+            print(string.format("[hop] Pick (clean): %s", s.jobId:sub(1, 8)))
             return s.jobId
         end
     end
-    -- Fallback: skip history saja
+
+    -- Pass 2: Belum di-scan saja (boleh ada di history lama)
+    for _, s in ipairs(servers) do
+        if s.jobId ~= currentJob and not isServerScanned(s.jobId) then
+            print(string.format("[hop] Pick (not-scanned): %s", s.jobId:sub(1, 8)))
+            return s.jobId
+        end
+    end
+
+    -- Pass 3: Semua sudah di-scan — reset scanned cache dan ambil yang tidak di history
+    warn("[hop] Semua server sudah di-scan, reset scanned cache")
+    sharedScannedCache = {}
+    lastScannedFetch = 0
+
     for _, s in ipairs(servers) do
         if s.jobId ~= currentJob and not isInHistory(s.jobId) then
+            print(string.format("[hop] Pick (reset-scanned): %s", s.jobId:sub(1, 8)))
             return s.jobId
         end
     end
-    warn("[hop] All servers in history, resetting")
+
+    -- Pass 4: Semua di history — reset history juga
+    warn("[hop] Semua server di history, reset history")
     hopHistory = {}
     saveHopHistory()
+
     for _, s in ipairs(servers) do
-        if s.jobId ~= currentJob then return s.jobId end
+        if s.jobId ~= currentJob then
+            print(string.format("[hop] Pick (reset-all): %s", s.jobId:sub(1, 8)))
+            return s.jobId
+        end
     end
+
     return nil
 end
 
@@ -893,18 +964,32 @@ local function doHop(reason)
         Library:Notify({ Title = "Auto Hop", Description = string.format("%s (%d/5)", reason, attempt), Time = 2 })
         local nextServer = pickNextServer()
         if not nextServer then
-            warn("[hop] No server found, attempt " .. attempt)
+            warn("[hop] Tidak ada server ditemukan, attempt " .. attempt)
             task.wait(3)
             continue
         end
+
+        -- Pastikan kita tidak hop ke server yang sama
+        if nextServer == currentJob then
+            warn("[hop] pickNextServer returned current server, skip")
+            task.wait(1)
+            continue
+        end
+
         isTeleporting = true
+        print(string.format("[hop] Teleporting to %s (attempt %d)", nextServer:sub(1, 8), attempt))
         joinServer(nextServer)
-        task.wait(6)
-        if game.JobId ~= currentJob then return true end
+        task.wait(8) -- tunggu lebih lama (dari 6s ke 8s) agar teleport punya waktu
+
+        if game.JobId ~= currentJob then
+            print("[hop] Teleport berhasil!")
+            return true
+        end
+
         isTeleporting = false
         addToHistory(nextServer)
-        warn("[hop] Teleport failed attempt " .. attempt)
-        task.wait(1)
+        warn("[hop] Teleport gagal attempt " .. attempt)
+        task.wait(2)
     end
     isTeleporting = false
     Library:Notify({ Title = "Auto Hop", Description = "All attempts failed", Time = 5 })
