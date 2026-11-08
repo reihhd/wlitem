@@ -3,7 +3,7 @@ local CONFIG = {
     PING_BASED = true,
     PING_OFFSET = 1.95,
     DISTANCE_TO_PARRY = 0.65,
-    EMERGENCY_RADIUS = 20,
+    EMERGENCY_RADIUS = 10,
     CLASH_DISTANCE = 22,
     CLASH_SPEED = 0.01,
     NORMAL_SPEED = 0.05,
@@ -12,6 +12,9 @@ local CONFIG = {
     AIMBOT = true,
     AIMBOT_SMOOTHNESS = 0.15,
     VISUALS = true,
+    SPEED_MUL = 1.0,
+    PARRY_TIME = 0.10,
+    PING_WEIGHT = 1.0,
 }
 
 local Players = game:GetService("Players")
@@ -31,8 +34,31 @@ local NetworkStats = Stats:FindFirstChild("Network")
     and Stats.Network:FindFirstChild("ServerStatsItem")
     and Stats.Network.ServerStatsItem:FindFirstChild("Data Ping")
 
+local smoothedSpeed = 0
+local lastBallPos = nil
+local lastBallPosTick = 0
+local lastBallAddr = nil
+
+local clashHlTimes = {}
+local clashMode = false
+local clashLastHlTick = 0
+local clashStartTick = 0
+local clashRearmAt = 0
+local prevHighlighted = false
+local hlOffSinceTick = 0
+
+local CLASH_WINDOW = 2.0
+local CLASH_TRIGGER_COUNT = 3
+local CLASH_MAX_DURATION = 3.0
+local CLASH_REARM_COOLDOWN = 1.5
+local CLASH_EXIT_IDLE = 0.8
+local CLASH_MIN_OFF = 0.025
+
 local r, m
 if CONFIG.VISUALS then
+    for _, v in workspace:GetChildren() do
+        if v.Name == "AltFarmCircle" then v:Destroy() end
+    end
     r = Instance.new("Part")
     r.Name = "AltFarmCircle"
     r.Parent = workspace
@@ -68,24 +94,85 @@ local function GetBall()
     if not BallsFolder then return nil end
     local children = BallsFolder:GetChildren()
     for i = 1, #children do
-        if children[i]:GetAttribute("realBall") == true then return children[i] end
+        local v = children[i]
+        if v:IsA("BasePart") and v.Transparency < 0.5 and v:FindFirstChild("zoomies") then
+            return v
+        end
     end
     for i = 1, #children do
-        if children[i]:IsA("BasePart") and children[i].AssemblyLinearVelocity.Magnitude > 15 then return children[i] end
+        local v = children[i]
+        if v:GetAttribute("realBall") == true then return v end
+    end
+    for i = 1, #children do
+        local v = children[i]
+        if v:IsA("BasePart") and v.AssemblyLinearVelocity.Magnitude > 15 then return v end
     end
     return nil
 end
 
-local function getBallTarget(ball)
-    local ok, val = pcall(ball.GetAttribute, ball, "target")
-    if ok and typeof(val) == "string" then return val end
-    return ""
+local function IsTargeted()
+    local char = LocalPlayer.Character
+    if not char then return false end
+    if char:GetAttribute("Targeted") == true then return true end
+    if char:FindFirstChild("Highlight") then return true end
+    return false
 end
 
-local function getBallFrom(ball)
-    local ok, val = pcall(ball.GetAttribute, ball, "from")
-    if ok and typeof(val) == "string" then return val end
-    return ""
+local function IsEnemyNearby(myPos, range)
+    local alive = workspace:FindFirstChild("Alive")
+    if not alive then return false end
+    for _, c in alive:GetChildren() do
+        if c ~= LocalPlayer.Character then
+            local hrp = c:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local dx = myPos.X - hrp.Position.X
+                local dz = myPos.Z - hrp.Position.Z
+                if math.sqrt(dx * dx + dz * dz) <= range then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function GetBallVelocity(ball)
+    local zoomies = ball:FindFirstChild("zoomies")
+    if zoomies then
+        local ok, vel = pcall(function() return zoomies.VectorVelocity end)
+        if ok and vel and vel.Magnitude > 0.5 then return vel end
+    end
+    return ball.AssemblyLinearVelocity
+end
+
+local function GetBallSpeed(ball, ballPos)
+    local vel = GetBallVelocity(ball)
+    local rawSpeed = vel.Magnitude
+
+    local now = tick()
+    if ball ~= lastBallAddr then
+        lastBallAddr = ball
+        lastBallPos = ballPos
+        lastBallPosTick = now
+        smoothedSpeed = rawSpeed
+        return rawSpeed, vel
+    end
+
+    if lastBallPosTick > 0 then
+        local dt = now - lastBallPosTick
+        if dt > 0.001 and dt < 0.5 then
+            local inst = (ballPos - lastBallPos).Magnitude / dt
+            if inst < 5000 then
+                smoothedSpeed = 0.4 * inst + 0.6 * smoothedSpeed
+            end
+        end
+    end
+    lastBallPos = ballPos
+    lastBallPosTick = now
+
+    local speed = rawSpeed > 0.5 and rawSpeed or smoothedSpeed
+    if speed > 5000 then speed = 5000 end
+    return speed, vel
 end
 
 local function getBlockButton()
@@ -235,25 +322,14 @@ RunService.RenderStepped:Connect(function()
     Camera.CFrame = Camera.CFrame:Lerp(targetCF, CONFIG.AIMBOT_SMOOTHNESS)
 end)
 
-local targetConnection = nil
-local function watchBallTarget(ball)
-    if targetConnection then targetConnection:Disconnect(); targetConnection = nil end
-    if ball then
-        targetConnection = ball:GetAttributeChangedSignal("target"):Connect(function()
-            LastBallHit = nil
-            IsParrying = false
-        end)
-    end
-end
-
 if BallsFolder then
     BallsFolder.ChildAdded:Connect(function()
-        local ball = GetBall()
-        if ball then
-            watchBallTarget(ball)
-            LastBallHit = nil
-            IsParrying = false
-        end
+        LastBallHit = nil
+        IsParrying = false
+        lastBallAddr = nil
+        smoothedSpeed = 0
+        clashMode = false
+        clashHlTimes = {}
     end)
 end
 
@@ -279,50 +355,100 @@ RunService.PostSimulation:Connect(function()
         return
     end
 
-    local myName = LocalPlayer.Name
-    local target = getBallTarget(Ball)
-    if target ~= myName then
-        if r then r.Transparency = 1 end
-        return
-    end
-
-    if getBallFrom(Ball) == CONFIG.MAIN_ACCOUNT then return end
-
     local BallPos = Ball.Position
     local PlayerPos = Root.Position
-    local Velocity = Ball.AssemblyLinearVelocity
-    local Speed = Velocity.Magnitude
     local Distance = (PlayerPos - BallPos).Magnitude
 
     if Distance > CONFIG.MAX_RANGE then return end
 
+    local Speed, Velocity = GetBallSpeed(Ball, BallPos)
+    if Speed < 1 then return end
+
     local dirToPlayer = (PlayerPos - BallPos).Unit
     local dot = dirToPlayer:Dot(Velocity.Unit)
 
-    if dot < 0 then LastBallHit = nil end
+    local Targeted = IsTargeted()
 
-    local IsClashing = Distance <= CONFIG.CLASH_DISTANCE
+    local nowTick = tick()
+    local nowHL = Targeted
+    local rose = nowHL and not prevHighlighted
+    local fell = not nowHL and prevHighlighted
+
+    if fell then hlOffSinceTick = nowTick end
+
+    local debounceOK = (nowTick - hlOffSinceTick) >= CLASH_MIN_OFF
+    local rearmOK = nowTick >= clashRearmAt
+    local enemyNearby = IsEnemyNearby(PlayerPos, CONFIG.CLASH_DISTANCE)
+
+    if rose and debounceOK and rearmOK and not clashMode and enemyNearby then
+        table.insert(clashHlTimes, nowTick)
+        clashLastHlTick = nowTick
+        while #clashHlTimes > 0 and (nowTick - clashHlTimes[1]) > CLASH_WINDOW do
+            table.remove(clashHlTimes, 1)
+        end
+        if #clashHlTimes >= CLASH_TRIGGER_COUNT then
+            clashMode = true
+            clashStartTick = nowTick
+        end
+    end
+
+    if nowHL then clashLastHlTick = nowTick end
+
+    if clashMode then
+        local exitIdle = (nowTick - clashLastHlTick) > CLASH_EXIT_IDLE
+        local exitMax = (nowTick - clashStartTick) > CLASH_MAX_DURATION
+        local exitEnemy = not enemyNearby
+        local exitHL = not nowHL and hlOffSinceTick > 0 and (nowTick - hlOffSinceTick) > 0.15
+        if exitIdle or exitMax or exitEnemy or exitHL then
+            clashMode = false
+            clashHlTimes = {}
+            clashRearmAt = nowTick + CLASH_REARM_COOLDOWN
+        end
+    end
+
+    prevHighlighted = nowHL
 
     frameCounter = frameCounter + 1
     if r and frameCounter % 2 == 0 then
-        r.Transparency = 0.3
-        UpdateVisuals(Root, Distance, IsClashing and "clash" or "target")
+        if Targeted then
+            UpdateVisuals(Root, Distance, clashMode and "clash" or "target")
+        else
+            if r then r.Transparency = 1 end
+        end
     end
 
-    if IsClashing then
+    if not Targeted then
+        LastBallHit = nil
+        return
+    end
+
+    if dot < 0 then LastBallHit = nil; return end
+
+    if clashMode then
         SendClick(true, Ball)
-    elseif dot > 0 then
-        local Ping = (NetworkStats and NetworkStats.Value / 1000) or 0.04
-        local TimeToHit = Distance / math.max(Speed, 1)
-        local Threshold = CONFIG.DISTANCE_TO_PARRY + (Ping * CONFIG.PING_OFFSET)
-        if Speed > 150 then Threshold = Threshold * 1.15 end
-        if TimeToHit <= Threshold or Distance <= CONFIG.EMERGENCY_RADIUS then
-            SendClick(false, Ball)
-        end
+        return
+    end
+
+    local Ping = (NetworkStats and NetworkStats:GetValue() / 1000) or 0.04
+    local PingComp = math.clamp(Ping * 10, 0.05, 0.17) * CONFIG.PING_WEIGHT
+    local VelocityTrigger = Speed * CONFIG.PARRY_TIME * CONFIG.SPEED_MUL
+    local Threshold = CONFIG.DISTANCE_TO_PARRY + PingComp + VelocityTrigger
+
+    if Speed > 150 then Threshold = Threshold * 1.15 end
+
+    local TimeToHit = Distance / Speed
+
+    if TimeToHit <= Threshold or Distance <= CONFIG.EMERGENCY_RADIUS then
+        SendClick(false, Ball)
     end
 end)
 
 LocalPlayer.CharacterAdded:Connect(function()
     LastBallHit = nil
     IsParrying = false
+    lastBallAddr = nil
+    smoothedSpeed = 0
+    clashMode = false
+    clashHlTimes = {}
+    prevHighlighted = false
 end)
