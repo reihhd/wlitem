@@ -12,7 +12,9 @@ local CONFIG = {
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 local Stats = game:GetService("Stats")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
@@ -20,6 +22,7 @@ local LastClick = 0
 local LastBallHit = nil
 local IsParrying = false
 local BallsFolder = workspace:FindFirstChild("Balls") or workspace:WaitForChild("Balls", 5)
+local Alive = workspace:FindFirstChild("Alive")
 
 local NetworkStats = Stats:FindFirstChild("Network")
     and Stats.Network:FindFirstChild("ServerStatsItem")
@@ -37,6 +40,7 @@ local clashStartTick = 0
 local clashRearmAt = 0
 local prevHighlighted = false
 local hlOffSinceTick = 0
+local parried = false
 
 local CLASH_WINDOW = 2.0
 local CLASH_TRIGGER_COUNT = 3
@@ -45,12 +49,136 @@ local CLASH_REARM_COOLDOWN = 1.5
 local CLASH_EXIT_IDLE = 0.8
 local CLASH_MIN_OFF = 0.025
 
+local _PARRY_PATCH = {
+    keyTable = nil,
+    transformFn = nil,
+    parryHash = nil,
+    parryRemote = nil,
+    ready = false,
+}
+
+task.spawn(function()
+    local ok, err = pcall(function()
+        local Controllers = ReplicatedStorage:WaitForChild("Controllers", 15)
+        if not Controllers then return end
+
+        local SC
+        for _, child in ipairs(Controllers:GetChildren()) do
+            if child.Name:sub(1, 16) == "SwordsController" then
+                SC = child
+                break
+            end
+        end
+        if not SC then return end
+
+        local PRY = SC:WaitForChild("PRY", 15)
+        if not PRY then return end
+
+        local Parry_Function = require(PRY)
+        local getupvals = debug.getupvalues or getupvalues
+        if not getupvals then return end
+
+        local ups = getupvals(Parry_Function)
+        if not ups or #ups < 8 then return end
+
+        _PARRY_PATCH.keyTable = ups[3]
+        _PARRY_PATCH.transformFn = ups[4]
+        _PARRY_PATCH.parryHash = ups[8]
+    end)
+    if not ok then warn("[PARRY] init error:", tostring(err)) end
+end)
+
+local _reverted = {}
+local _original = {}
+
+local function _is_valid(args)
+    return #args == 8 and type(args[2]) == "string" and type(args[3]) == "string"
+        and type(args[4]) == "number" and typeof(args[5]) == "CFrame"
+        and type(args[6]) == "table" and type(args[7]) == "table"
+        and type(args[8]) == "boolean"
+end
+
+local function _hook(remote)
+    if not _reverted[remote] then
+        if not _original[getrawmetatable(remote)] then
+            _original[getrawmetatable(remote)] = true
+            local _meta = getrawmetatable(remote)
+            setreadonly(_meta, false)
+            local _old = _meta.__index
+            _meta.__index = function(self, key)
+                if (key == "FireServer" and self:IsA("RemoteEvent")) or
+                   (key == "InvokeServer" and self:IsA("RemoteFunction")) then
+                    return function(_, ...)
+                        local _arguments = {...}
+                        if _is_valid(_arguments) then
+                            if not _reverted[self] then
+                                _reverted[self] = _arguments
+                                _PARRY_PATCH.ready = true
+                                _PARRY_PATCH.parryRemote = self
+                            end
+                        end
+                        return _old(self, key)(_, unpack(_arguments))
+                    end
+                end
+                return _old(self, key)
+            end
+            setreadonly(_meta, true)
+        end
+    end
+end
+
+for _, _remote in pairs(ReplicatedStorage:GetDescendants()) do
+    if _remote:IsA("RemoteEvent") or _remote:IsA("RemoteFunction") then
+        _hook(_remote)
+    end
+end
+
+function _PARRY_PATCH.fire(curveCFrame, screenPositions, mouseLocation)
+    if not _PARRY_PATCH.ready then return false end
+    local kt = _PARRY_PATCH.keyTable
+    if not kt then return false end
+    local keyIndex = kt[1]
+    local currentKey = kt[2] and kt[2][keyIndex]
+    if not currentKey then return false end
+
+    local tok, transformed = pcall(_PARRY_PATCH.transformFn, currentKey, "TIME")
+    if not tok or not transformed then
+        tok, transformed = pcall(_PARRY_PATCH.transformFn, currentKey)
+        if not tok or not transformed then return false end
+    end
+
+    local serverTime = workspace:GetServerTimeNow() * 100
+    local timeStr = tostring(math.floor(serverTime))
+    local tc = {}
+    for i = 1, #timeStr do
+        local ki = (i - 1) % #transformed + 1
+        local kb = string.byte(transformed, ki)
+        local tb = (string.byte(timeStr, i) + i) % 256
+        tc[i] = string.char(bit32.bxor(tb, kb))
+    end
+    local token = table.concat(tc)
+
+    local fok = pcall(function()
+        _PARRY_PATCH.parryRemote:FireServer(
+            _PARRY_PATCH.parryHash,
+            currentKey,
+            token,
+            0.5,
+            curveCFrame,
+            screenPositions,
+            mouseLocation,
+            false
+        )
+    end)
+    return fok
+end
+
 local function isAlive()
-    local alive = workspace:FindFirstChild("Alive")
-    if not alive then return false end
+    Alive = workspace:FindFirstChild("Alive")
+    if not Alive then return false end
     local char = LocalPlayer.Character
     if not char then return false end
-    return alive:FindFirstChild(LocalPlayer.Name) == char
+    return Alive:FindFirstChild(LocalPlayer.Name) == char
 end
 
 local function getHRP()
@@ -91,9 +219,8 @@ local function IsTargeted(ball)
 end
 
 local function IsEnemyNearby(myPos, range)
-    local alive = workspace:FindFirstChild("Alive")
-    if not alive then return false end
-    for _, c in alive:GetChildren() do
+    if not Alive then return false end
+    for _, c in Alive:GetChildren() do
         if c ~= LocalPlayer.Character then
             local hrp = c:FindFirstChild("HumanoidRootPart")
             if hrp then
@@ -147,72 +274,52 @@ local function GetBallSpeed(ball, ballPos)
     return speed, vel
 end
 
-local function ComputeRadius(ballSpeed, pingMs, accuracy)
-    local pingThresh = math.clamp(pingMs / 100, 5, 17)
+local divisorMul = 0.7 + (CONFIG.ACCURACY - 1) * 0.0035353535353535
+
+local function ComputeRadius(ballSpeed, pingMs)
+    local pingThresh = math.clamp(pingMs / 10, 5, 17)
     local cappedDiff = math.min(math.max(ballSpeed - 9.5, 0), 650)
-    local divBase = 2.4 + cappedDiff * 0.002
-    local divMul = accuracy
-    local speedComp = math.max(ballSpeed / (divBase * divMul), 9.5)
+    local divBase = (2.4 + cappedDiff * 0.002) * divisorMul
+    local speedComp = math.max(ballSpeed / divBase, 9.5)
     return pingThresh + speedComp
 end
 
-local function getBlockButton()
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then return nil end
-    local hotbar = pg:FindFirstChild("Hotbar")
-    if not hotbar then return nil end
-    return hotbar:FindFirstChild("Block")
-end
-
-local VIM = game:GetService("VirtualInputManager")
-
-local function SendClick(isClashing, ball)
+local function SendParry()
     if not CONFIG.ENABLED or IsParrying then return end
-    local now = tick()
-    local cd = isClashing and CONFIG.CLASH_SPEED or CONFIG.NORMAL_SPEED
-
-    if not isClashing and LastBallHit == ball and (now - LastClick) < 0.5 then return end
-    if (now - LastClick) < cd then return end
 
     IsParrying = true
-    LastClick = now
-    LastBallHit = ball
 
-    local btn = getBlockButton()
-    if btn then
-        local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2
-        local x, y = pos.X, pos.Y
+    local cam = Camera
+    local curveCF = cam.CFrame
 
-        local fired = pcall(function()
-            VIM:SendTouchEvent(x, y, 0, game)
-            task.defer(function()
-                pcall(function() VIM:SendTouchEvent(x, y, 2, game) end)
-            end)
-        end)
-
-        if not fired then
-            fired = pcall(function()
-                VIM:SendMouseButtonEvent(x, y, 0, true, game, 1)
-                task.defer(function()
-                    pcall(function() VIM:SendMouseButtonEvent(x, y, 0, false, game, 1) end)
+    local screenPositions = {}
+    if Alive then
+        for _, entity in Alive:GetChildren() do
+            if entity.PrimaryPart then
+                local ok2, sp = pcall(function()
+                    return cam:WorldToScreenPoint(entity.PrimaryPart.Position)
                 end)
-            end)
-        end
-
-        if not fired then
-            fired = pcall(function()
-                firesignal(btn, "Activated")
-            end)
-        end
-
-        if not fired then
-            pcall(function()
-                for _, c in pairs(getconnections(btn.Activated)) do c:Fire() end
-            end)
+                if ok2 then
+                    screenPositions[entity.Name] = sp
+                end
+            end
         end
     end
 
-    task.delay(cd, function() IsParrying = false end)
+    local mouseLocation
+    local ok, mouse = pcall(function()
+        return UserInputService:GetMouseLocation()
+    end)
+    if ok and mouse then
+        mouseLocation = {mouse.X, mouse.Y}
+    else
+        local vp = cam.ViewportSize
+        mouseLocation = {vp.X / 2, vp.Y / 2}
+    end
+
+    _PARRY_PATCH.fire(curveCF, screenPositions, mouseLocation)
+
+    task.delay(0.5, function() IsParrying = false end)
 end
 
 local screenGui = Instance.new("ScreenGui")
@@ -252,7 +359,7 @@ local function makeBtn(parent, yPos, label, default, callback)
     Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
     local state = default
     local function update()
-        btn.Text = state and (label .. "  ✓") or (label .. "  ✗")
+        btn.Text = state and (label .. "  ON") or (label .. "  OFF")
         btn.BackgroundColor3 = state and Color3.fromRGB(0, 140, 70) or Color3.fromRGB(80, 25, 25)
         btn.TextColor3 = Color3.new(1, 1, 1)
         callback(state)
@@ -267,15 +374,21 @@ end
 makeBtn(mainFrame, 26, "Auto Parry", CONFIG.ENABLED, function(v) CONFIG.ENABLED = v end)
 makeBtn(mainFrame, 58, "Aimbot Main", CONFIG.AIMBOT, function(v) CONFIG.AIMBOT = v end)
 
-local accLabel = Instance.new("TextLabel", mainFrame)
-accLabel.Size = UDim2.new(1, -16, 0, 16)
-accLabel.Position = UDim2.new(0, 8, 0, 92)
-accLabel.BackgroundTransparency = 1
-accLabel.Text = "Accuracy: " .. CONFIG.ACCURACY
-accLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
-accLabel.Font = Enum.Font.Gotham
-accLabel.TextSize = 10
-accLabel.TextXAlignment = Enum.TextXAlignment.Left
+local statusLabel = Instance.new("TextLabel", mainFrame)
+statusLabel.Size = UDim2.new(1, -16, 0, 16)
+statusLabel.Position = UDim2.new(0, 8, 0, 92)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "Remote: loading..."
+statusLabel.TextColor3 = Color3.fromRGB(140, 140, 140)
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 10
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+task.spawn(function()
+    while not _PARRY_PATCH.ready do task.wait(0.5) end
+    statusLabel.Text = "Remote: ready"
+    statusLabel.TextColor3 = Color3.fromRGB(0, 200, 80)
+end)
 
 local minimizeBtn = Instance.new("TextButton", mainFrame)
 minimizeBtn.Size = UDim2.new(0, 18, 0, 18)
@@ -314,11 +427,13 @@ if BallsFolder then
         smoothedSpeed = 0
         clashMode = false
         clashHlTimes = {}
+        parried = false
     end)
 end
 
-RunService.PostSimulation:Connect(function()
+RunService.PreSimulation:Connect(function()
     if not CONFIG.ENABLED then return end
+    if not _PARRY_PATCH.ready then return end
     if not isAlive() then return end
 
     local Root = getHRP()
@@ -327,17 +442,24 @@ RunService.PostSimulation:Connect(function()
     local Ball = GetBall()
     if not Ball then return end
 
+    local zoomies = Ball:FindFirstChild("zoomies")
+    if not zoomies then return end
+
+    if parried then return end
+
+    Ball:GetAttributeChangedSignal("target"):Once(function()
+        parried = false
+    end)
+
     local BallPos = Ball.Position
     local PlayerPos = Root.Position
     local Distance = (PlayerPos - BallPos).Magnitude
 
     if Distance > CONFIG.MAX_RANGE then return end
 
-    local Speed, Velocity = GetBallSpeed(Ball, BallPos)
+    local Velocity = GetBallVelocity(Ball)
+    local Speed = Velocity.Magnitude
     if Speed < 1 then return end
-
-    local dirToPlayer = (PlayerPos - BallPos).Unit
-    local dot = dirToPlayer:Dot(Velocity.Unit)
 
     local Targeted = IsTargeted(Ball)
 
@@ -390,30 +512,18 @@ RunService.PostSimulation:Connect(function()
         return
     end
 
-    if dot < 0 then LastBallHit = nil; return end
-
     if clashMode then
-        SendClick(true, Ball)
+        SendParry()
+        parried = true
         return
     end
 
-    local Ping = (NetworkStats and NetworkStats:GetValue() / 1000) or 0.04
-    local PingMs = Ping * 1000
-    local TriggerRadius = ComputeRadius(Speed, PingMs, CONFIG.ACCURACY)
+    local Ping = (NetworkStats and NetworkStats:GetValue() / 10) or 4
+    local TriggerRadius = ComputeRadius(Speed, Ping)
 
-    if TriggerRadius < 5 then TriggerRadius = 5 end
-    if TriggerRadius > 300 then TriggerRadius = 300 end
-
-    local ETA = Distance / Speed
-    local etaThresh = TriggerRadius / Speed
-    local leadTime = 0.012 + math.min(Speed / 50000, 0.008)
-    etaThresh = etaThresh + leadTime
-
-    local etaReady = dot > 0.25 and ETA <= etaThresh
-    local insideRadius = Distance <= TriggerRadius
-
-    if etaReady or insideRadius then
-        SendClick(false, Ball)
+    if Distance <= TriggerRadius then
+        SendParry()
+        parried = true
     end
 end)
 
@@ -425,4 +535,5 @@ LocalPlayer.CharacterAdded:Connect(function()
     clashMode = false
     clashHlTimes = {}
     prevHighlighted = false
+    parried = false
 end)
