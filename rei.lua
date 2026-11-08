@@ -199,6 +199,14 @@ local function getMainHRP()
     return char:FindFirstChild("HumanoidRootPart")
 end
 
+local function isMainAlive()
+    Alive = workspace:FindFirstChild("Alive")
+    if not Alive then return false end
+    local main = Players:FindFirstChild(CONFIG.MAIN_ACCOUNT)
+    if not main or not main.Character then return false end
+    return Alive:FindFirstChild(CONFIG.MAIN_ACCOUNT) ~= nil
+end
+
 local function GetBall()
     if not BallsFolder then return nil end
     local children = BallsFolder:GetChildren()
@@ -460,15 +468,20 @@ RunService.Heartbeat:Connect(function()
             end
         end
         if awayDir.Magnitude > 0.1 then
-            hum:Move(Vector3.new(awayDir.X, 0, awayDir.Z).Unit)
+            local awayFlat = Vector3.new(awayDir.X, 0, awayDir.Z).Unit
+            hum.WalkToPoint = myPos + awayFlat * 50
+            hum:MoveTo(myPos + awayFlat * 50)
         end
         return
     end
 
     if dist > CONFIG.WALK_MAX_DIST then
-        hum:Move(dirFlat.Unit)
+        local walkTarget = targetPos - dirFlat.Unit * (CONFIG.WALK_MAX_DIST * 0.8)
+        hum.WalkToPoint = walkTarget
+        hum:MoveTo(walkTarget)
     else
-        hum:Move(Vector3.zero)
+        hum.WalkToPoint = myPos
+        hum:MoveTo(myPos)
     end
 end)
 
@@ -488,6 +501,7 @@ RunService.PreSimulation:Connect(function()
     if not CONFIG.ENABLED then return end
     if not _PARRY_PATCH.ready then return end
     if not isAlive() then return end
+    if not isMainAlive() then return end
 
     local Root = getHRP()
     if not Root then return end
