@@ -7,7 +7,7 @@ local CONFIG = {
     CLASH_DISTANCE = 22,
     CLASH_SPEED = 0.01,
     NORMAL_SPEED = 0.05,
-    ACCURACY = 3.0,
+    ACCURACY = 2.0,
 }
 
 local Players = game:GetService("Players")
@@ -322,90 +322,73 @@ local function SendParry()
     task.delay(0.5, function() IsParrying = false end)
 end
 
+local CoreGui = game:GetService("CoreGui")
+local oldGui = CoreGui:FindFirstChild("AltFarmGui")
+if oldGui then oldGui:Destroy() end
+
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "AltFarmGui"
 screenGui.ResetOnSpawn = false
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-local oldGui = game:GetService("CoreGui"):FindFirstChild("AltFarmGui")
-if oldGui then oldGui:Destroy() end
-screenGui.Parent = game:GetService("CoreGui")
+screenGui.Parent = CoreGui
 
 local mainFrame = Instance.new("Frame", screenGui)
-mainFrame.Size = UDim2.new(0, 150, 0, 120)
-mainFrame.Position = UDim2.new(0, 10, 0.5, -60)
-mainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-mainFrame.BackgroundTransparency = 0.1
+mainFrame.Size = UDim2.new(0, 130, 0, 90)
+mainFrame.Position = UDim2.new(0, 8, 0.5, -45)
+mainFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+mainFrame.BackgroundTransparency = 0.05
 mainFrame.BorderSizePixel = 0
 mainFrame.Active = true
 mainFrame.Draggable = true
-Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 8)
-Instance.new("UIStroke", mainFrame).Color = Color3.fromRGB(60, 60, 60)
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 6)
 
-local title = Instance.new("TextLabel", mainFrame)
-title.Size = UDim2.new(1, 0, 0, 22)
-title.BackgroundTransparency = 1
-title.Text = "Alt Farm"
-title.TextColor3 = Color3.new(1, 1, 1)
-title.Font = Enum.Font.GothamBold
-title.TextSize = 12
+local stroke = Instance.new("UIStroke", mainFrame)
+stroke.Color = Color3.fromRGB(45, 45, 45)
+stroke.Thickness = 1
 
-local function makeBtn(parent, yPos, label, default, callback)
-    local btn = Instance.new("TextButton", parent)
-    btn.Size = UDim2.new(1, -16, 0, 28)
-    btn.Position = UDim2.new(0, 8, 0, yPos)
-    btn.Font = Enum.Font.GothamBold
-    btn.TextSize = 12
-    btn.BorderSizePixel = 0
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
-    local state = default
-    local function update()
-        btn.Text = state and (label .. "  ON") or (label .. "  OFF")
-        btn.BackgroundColor3 = state and Color3.fromRGB(0, 140, 70) or Color3.fromRGB(80, 25, 25)
-        btn.TextColor3 = Color3.new(1, 1, 1)
-        callback(state)
-    end
-    update()
-    btn.MouseButton1Click:Connect(function()
-        state = not state
-        update()
-    end)
-end
-
-makeBtn(mainFrame, 26, "Auto Parry", CONFIG.ENABLED, function(v) CONFIG.ENABLED = v end)
-makeBtn(mainFrame, 58, "Aimbot Main", CONFIG.AIMBOT, function(v) CONFIG.AIMBOT = v end)
-
-local statusLabel = Instance.new("TextLabel", mainFrame)
-statusLabel.Size = UDim2.new(1, -16, 0, 16)
-statusLabel.Position = UDim2.new(0, 8, 0, 92)
-statusLabel.BackgroundTransparency = 1
-statusLabel.Text = "Remote: loading..."
-statusLabel.TextColor3 = Color3.fromRGB(140, 140, 140)
-statusLabel.Font = Enum.Font.Gotham
-statusLabel.TextSize = 10
-statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+local statusDot = Instance.new("Frame", mainFrame)
+statusDot.Size = UDim2.new(0, 6, 0, 6)
+statusDot.Position = UDim2.new(0, 8, 0, 8)
+statusDot.BorderSizePixel = 0
+statusDot.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+Instance.new("UICorner", statusDot).CornerRadius = UDim.new(1, 0)
 
 task.spawn(function()
     while not _PARRY_PATCH.ready do task.wait(0.5) end
-    statusLabel.Text = "Remote: ready"
-    statusLabel.TextColor3 = Color3.fromRGB(0, 200, 80)
+    statusDot.BackgroundColor3 = Color3.fromRGB(0, 180, 60)
 end)
 
-local minimizeBtn = Instance.new("TextButton", mainFrame)
-minimizeBtn.Size = UDim2.new(0, 18, 0, 18)
-minimizeBtn.Position = UDim2.new(1, -22, 0, 2)
-minimizeBtn.Text = "—"
-minimizeBtn.Font = Enum.Font.GothamBold
-minimizeBtn.TextSize = 11
-minimizeBtn.TextColor3 = Color3.new(1, 1, 1)
-minimizeBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
-minimizeBtn.BorderSizePixel = 0
-Instance.new("UICorner", minimizeBtn).CornerRadius = UDim.new(0, 4)
-local minimized = false
-minimizeBtn.MouseButton1Click:Connect(function()
-    minimized = not minimized
-    mainFrame.Size = minimized and UDim2.new(0, 150, 0, 22) or UDim2.new(0, 150, 0, 120)
-    minimizeBtn.Text = minimized and "+" or "—"
-end)
+local function makeToggle(parent, yPos, label, default, callback)
+    local btn = Instance.new("TextButton", parent)
+    btn.Size = UDim2.new(1, -12, 0, 30)
+    btn.Position = UDim2.new(0, 6, 0, yPos)
+    btn.Font = Enum.Font.GothamMedium
+    btn.TextSize = 11
+    btn.BorderSizePixel = 0
+    btn.AutoButtonColor = false
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
+
+    local state = default
+    local function render()
+        btn.Text = label
+        if state then
+            btn.BackgroundColor3 = Color3.fromRGB(25, 100, 55)
+            btn.TextColor3 = Color3.fromRGB(200, 255, 220)
+        else
+            btn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+            btn.TextColor3 = Color3.fromRGB(120, 120, 120)
+        end
+        callback(state)
+    end
+    render()
+    btn.MouseButton1Click:Connect(function()
+        state = not state
+        render()
+    end)
+end
+
+makeToggle(mainFrame, 20, "Parry", CONFIG.ENABLED, function(v) CONFIG.ENABLED = v end)
+makeToggle(mainFrame, 54, "Aimbot", CONFIG.AIMBOT, function(v) CONFIG.AIMBOT = v end)
 
 RunService.RenderStepped:Connect(function()
     if not CONFIG.AIMBOT then return end
