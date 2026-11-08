@@ -1,20 +1,13 @@
 local CONFIG = {
     MAIN_ACCOUNT = "dl_cu",
-    PING_BASED = true,
-    PING_OFFSET = 1.95,
-    DISTANCE_TO_PARRY = 0.65,
-    EMERGENCY_RADIUS = 20,
-    CLASH_DISTANCE = 22,
-    CLASH_SPEED = 0.01,
-    NORMAL_SPEED = 0.05,
-    MAX_RANGE = 200,
     ENABLED = true,
     AIMBOT = true,
     AIMBOT_SMOOTHNESS = 0.15,
     VISUALS = true,
-    SPEED_MUL = 1.0,
-    PARRY_TIME = 0.10,
-    PING_WEIGHT = 1.0,
+    MAX_RANGE = 200,
+    CLASH_DISTANCE = 22,
+    CLASH_SPEED = 0.01,
+    NORMAL_SPEED = 0.05,
 }
 
 local Players = game:GetService("Players")
@@ -170,6 +163,14 @@ local function GetBallSpeed(ball, ballPos)
     return speed, vel
 end
 
+local function ComputeV1Radius(ballSpeed, pingMs)
+    local pingThresh = math.clamp(pingMs / 100, 5, 17)
+    local cappedDiff = math.min(math.max(ballSpeed - 9.5, 0), 650)
+    local divBase = 2.4 + cappedDiff * 0.002
+    local speedComp = math.max(ballSpeed / divBase, 9.5)
+    return pingThresh + speedComp
+end
+
 local function getBlockButton()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     if not pg then return nil end
@@ -192,9 +193,32 @@ local function SendClick(isClashing, ball)
 
     local btn = getBlockButton()
     if btn then
-        for _, c in pairs(getconnections(btn.Activated)) do c:Fire() end
-        for _, c in pairs(getconnections(btn.MouseButton1Click)) do c:Fire() end
-        for _, c in pairs(getconnections(btn.MouseButton1Down)) do c:Fire() end
+        local fired = false
+
+        if not fired then
+            fired = pcall(function()
+                firesignal(btn, "Activated")
+            end)
+        end
+
+        if not fired then
+            fired = pcall(function()
+                firesignal(btn, "MouseButton1Click")
+            end)
+        end
+
+        if not fired then
+            fired = pcall(function()
+                fireclick(btn)
+            end)
+        end
+
+        if not fired then
+            pcall(function()
+                for _, c in pairs(getconnections(btn.Activated)) do c:Fire() end
+                for _, c in pairs(getconnections(btn.MouseButton1Click)) do c:Fire() end
+            end)
+        end
     end
 
     task.delay(cd, function() IsParrying = false end)
@@ -245,6 +269,16 @@ title.Text = "Alt Farm"
 title.TextColor3 = Color3.new(1, 1, 1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 13
+
+local statusLabel = Instance.new("TextLabel", mainFrame)
+statusLabel.Size = UDim2.new(1, -16, 0, 14)
+statusLabel.Position = UDim2.new(0, 8, 0, 118)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "..."
+statusLabel.TextColor3 = Color3.fromRGB(140, 140, 140)
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 10
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
 
 local function makeToggle(parent, yPos, label, default, callback)
     local row = Instance.new("Frame", parent)
@@ -303,6 +337,18 @@ minimizeBtn.MouseButton1Click:Connect(function()
     minimized = not minimized
     mainFrame.Size = minimized and UDim2.new(0, 160, 0, 24) or UDim2.new(0, 160, 0, 150)
     minimizeBtn.Text = minimized and "+" or "—"
+end)
+
+task.spawn(function()
+    local method = "none"
+    if pcall(function() return firesignal end) and firesignal then
+        method = "firesignal"
+    elseif pcall(function() return fireclick end) and fireclick then
+        method = "fireclick"
+    elseif pcall(function() return getconnections end) and getconnections then
+        method = "getconnections"
+    end
+    statusLabel.Text = "Method: " .. method
 end)
 
 RunService.RenderStepped:Connect(function()
@@ -430,15 +476,22 @@ RunService.PostSimulation:Connect(function()
     end
 
     local Ping = (NetworkStats and NetworkStats:GetValue() / 1000) or 0.04
-    local PingComp = math.clamp(Ping * 10, 0.05, 0.17) * CONFIG.PING_WEIGHT
-    local VelocityTrigger = Speed * CONFIG.PARRY_TIME * CONFIG.SPEED_MUL
-    local Threshold = CONFIG.DISTANCE_TO_PARRY + PingComp + VelocityTrigger
+    local PingMs = Ping * 1000
+    local TriggerRadius = ComputeV1Radius(Speed, PingMs)
 
-    if Speed > 150 then Threshold = Threshold * 1.15 end
+    if TriggerRadius < 5 then TriggerRadius = 5 end
+    if TriggerRadius > 300 then TriggerRadius = 300 end
 
-    local TimeToHit = Distance / Speed
+    local ETA = Distance / Speed
 
-    if TimeToHit <= Threshold or Distance <= CONFIG.EMERGENCY_RADIUS then
+    local etaThresh = TriggerRadius / Speed
+    local leadTime = 0.012 + math.min(Speed / 50000, 0.008)
+    etaThresh = etaThresh + leadTime
+
+    local etaReady = dot > 0.25 and ETA <= etaThresh
+    local insideRadius = Distance <= TriggerRadius
+
+    if etaReady or insideRadius then
         SendClick(false, Ball)
     end
 end)
