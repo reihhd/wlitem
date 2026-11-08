@@ -7,7 +7,7 @@ local CONFIG = {
     CLASH_DISTANCE = 22,
     CLASH_SPEED = 0.01,
     NORMAL_SPEED = 0.05,
-    ACCURACY = 2.0,
+    ACCURACY = 3.0,
 }
 
 local Players = game:GetService("Players")
