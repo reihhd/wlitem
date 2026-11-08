@@ -164,6 +164,8 @@ local function getBlockButton()
     return hotbar:FindFirstChild("Block")
 end
 
+local VIM = game:GetService("VirtualInputManager")
+
 local function SendClick(isClashing, ball)
     if not CONFIG.ENABLED or IsParrying then return end
     local now = tick()
@@ -178,7 +180,24 @@ local function SendClick(isClashing, ball)
 
     local btn = getBlockButton()
     if btn then
-        local fired = false
+        local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2
+        local x, y = pos.X, pos.Y
+
+        local fired = pcall(function()
+            VIM:SendTouchEvent(x, y, 0, game)
+            task.defer(function()
+                pcall(function() VIM:SendTouchEvent(x, y, 2, game) end)
+            end)
+        end)
+
+        if not fired then
+            fired = pcall(function()
+                VIM:SendMouseButtonEvent(x, y, 0, true, game, 1)
+                task.defer(function()
+                    pcall(function() VIM:SendMouseButtonEvent(x, y, 0, false, game, 1) end)
+                end)
+            end)
+        end
 
         if not fired then
             fired = pcall(function()
@@ -187,21 +206,8 @@ local function SendClick(isClashing, ball)
         end
 
         if not fired then
-            fired = pcall(function()
-                firesignal(btn, "MouseButton1Click")
-            end)
-        end
-
-        if not fired then
-            fired = pcall(function()
-                fireclick(btn)
-            end)
-        end
-
-        if not fired then
             pcall(function()
                 for _, c in pairs(getconnections(btn.Activated)) do c:Fire() end
-                for _, c in pairs(getconnections(btn.MouseButton1Click)) do c:Fire() end
             end)
         end
     end
