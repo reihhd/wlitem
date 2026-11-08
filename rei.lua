@@ -3,16 +3,15 @@ local CONFIG = {
     ENABLED = true,
     AIMBOT = true,
     AIMBOT_SMOOTHNESS = 0.15,
-    VISUALS = true,
     MAX_RANGE = 200,
     CLASH_DISTANCE = 22,
     CLASH_SPEED = 0.01,
     NORMAL_SPEED = 0.05,
+    ACCURACY = 2.0,
 }
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
 local Stats = game:GetService("Stats")
 
 local LocalPlayer = Players.LocalPlayer
@@ -20,7 +19,6 @@ local Camera = workspace.CurrentCamera
 local LastClick = 0
 local LastBallHit = nil
 local IsParrying = false
-local frameCounter = 0
 local BallsFolder = workspace:FindFirstChild("Balls") or workspace:WaitForChild("Balls", 5)
 
 local NetworkStats = Stats:FindFirstChild("Network")
@@ -46,20 +44,6 @@ local CLASH_MAX_DURATION = 3.0
 local CLASH_REARM_COOLDOWN = 1.5
 local CLASH_EXIT_IDLE = 0.8
 local CLASH_MIN_OFF = 0.025
-
-local r, m
-if CONFIG.VISUALS then
-    for _, v in workspace:GetChildren() do
-        if v.Name == "AltFarmCircle" then v:Destroy() end
-    end
-    r = Instance.new("Part")
-    r.Name = "AltFarmCircle"
-    r.Parent = workspace
-    r.Anchored, r.CanCollide = true, false
-    r.Transparency, r.Material = 0.3, Enum.Material.Neon
-    m = Instance.new("SpecialMesh", r)
-    m.MeshId = "rbxassetid://3270017"
-end
 
 local function isAlive()
     local alive = workspace:FindFirstChild("Alive")
@@ -163,11 +147,12 @@ local function GetBallSpeed(ball, ballPos)
     return speed, vel
 end
 
-local function ComputeV1Radius(ballSpeed, pingMs)
+local function ComputeRadius(ballSpeed, pingMs, accuracy)
     local pingThresh = math.clamp(pingMs / 100, 5, 17)
     local cappedDiff = math.min(math.max(ballSpeed - 9.5, 0), 650)
     local divBase = 2.4 + cappedDiff * 0.002
-    local speedComp = math.max(ballSpeed / divBase, 9.5)
+    local divMul = accuracy
+    local speedComp = math.max(ballSpeed / (divBase * divMul), 9.5)
     return pingThresh + speedComp
 end
 
@@ -224,23 +209,6 @@ local function SendClick(isClashing, ball)
     task.delay(cd, function() IsParrying = false end)
 end
 
-local function UpdateVisuals(root, distance, state)
-    if not CONFIG.VISUALS or not r then return end
-    r.CFrame = root.CFrame * CFrame.new(0, -2.6, 0) * CFrame.Angles(math.rad(90), 0, 0)
-    local targetSize = math.clamp(distance * 0.8, 5, 65)
-    m.Scale = m.Scale:Lerp(Vector3.new(targetSize, targetSize, 0.5), 0.5)
-    if state == "clash" then
-        r.Color = Color3.fromRGB(255, 0, 0)
-        r.Transparency = 0.05
-    elseif state == "target" then
-        r.Color = Color3.fromRGB(0, 255, 255)
-        r.Transparency = 0.1
-    else
-        r.Color = Color3.fromRGB(150, 240, 255)
-        r.Transparency = 0.5
-    end
-end
-
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "AltFarmGui"
 screenGui.ResetOnSpawn = false
@@ -250,60 +218,36 @@ if oldGui then oldGui:Destroy() end
 screenGui.Parent = game:GetService("CoreGui")
 
 local mainFrame = Instance.new("Frame", screenGui)
-mainFrame.Size = UDim2.new(0, 160, 0, 150)
-mainFrame.Position = UDim2.new(0, 10, 0.5, -75)
-mainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-mainFrame.BackgroundTransparency = 0.15
+mainFrame.Size = UDim2.new(0, 150, 0, 120)
+mainFrame.Position = UDim2.new(0, 10, 0.5, -60)
+mainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+mainFrame.BackgroundTransparency = 0.1
 mainFrame.BorderSizePixel = 0
 mainFrame.Active = true
 mainFrame.Draggable = true
 Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 8)
-local stroke = Instance.new("UIStroke", mainFrame)
-stroke.Color = Color3.fromRGB(80, 80, 80)
-stroke.Thickness = 1
+Instance.new("UIStroke", mainFrame).Color = Color3.fromRGB(60, 60, 60)
 
 local title = Instance.new("TextLabel", mainFrame)
-title.Size = UDim2.new(1, 0, 0, 24)
+title.Size = UDim2.new(1, 0, 0, 22)
 title.BackgroundTransparency = 1
 title.Text = "Alt Farm"
 title.TextColor3 = Color3.new(1, 1, 1)
 title.Font = Enum.Font.GothamBold
-title.TextSize = 13
+title.TextSize = 12
 
-local statusLabel = Instance.new("TextLabel", mainFrame)
-statusLabel.Size = UDim2.new(1, -16, 0, 14)
-statusLabel.Position = UDim2.new(0, 8, 0, 118)
-statusLabel.BackgroundTransparency = 1
-statusLabel.Text = "..."
-statusLabel.TextColor3 = Color3.fromRGB(140, 140, 140)
-statusLabel.Font = Enum.Font.Gotham
-statusLabel.TextSize = 10
-statusLabel.TextXAlignment = Enum.TextXAlignment.Left
-
-local function makeToggle(parent, yPos, label, default, callback)
-    local row = Instance.new("Frame", parent)
-    row.Size = UDim2.new(1, -16, 0, 26)
-    row.Position = UDim2.new(0, 8, 0, yPos)
-    row.BackgroundTransparency = 1
-    local lbl = Instance.new("TextLabel", row)
-    lbl.Size = UDim2.new(0.65, 0, 1, 0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = label
-    lbl.TextColor3 = Color3.fromRGB(200, 200, 200)
-    lbl.Font = Enum.Font.Gotham
-    lbl.TextSize = 12
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    local btn = Instance.new("TextButton", row)
-    btn.Size = UDim2.new(0.3, 0, 0, 20)
-    btn.Position = UDim2.new(0.7, 0, 0.5, -10)
+local function makeBtn(parent, yPos, label, default, callback)
+    local btn = Instance.new("TextButton", parent)
+    btn.Size = UDim2.new(1, -16, 0, 28)
+    btn.Position = UDim2.new(0, 8, 0, yPos)
     btn.Font = Enum.Font.GothamBold
-    btn.TextSize = 11
+    btn.TextSize = 12
     btn.BorderSizePixel = 0
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
     local state = default
     local function update()
-        btn.Text = state and "ON" or "OFF"
-        btn.BackgroundColor3 = state and Color3.fromRGB(0, 170, 80) or Color3.fromRGB(120, 30, 30)
+        btn.Text = state and (label .. "  ✓") or (label .. "  ✗")
+        btn.BackgroundColor3 = state and Color3.fromRGB(0, 140, 70) or Color3.fromRGB(80, 25, 25)
         btn.TextColor3 = Color3.new(1, 1, 1)
         callback(state)
     end
@@ -312,43 +256,36 @@ local function makeToggle(parent, yPos, label, default, callback)
         state = not state
         update()
     end)
-    return function() return state end, function(v) state = v; update() end
 end
 
-makeToggle(mainFrame, 28, "Auto Parry", CONFIG.ENABLED, function(v) CONFIG.ENABLED = v end)
-makeToggle(mainFrame, 58, "Aimbot Main", CONFIG.AIMBOT, function(v) CONFIG.AIMBOT = v end)
-makeToggle(mainFrame, 88, "Visuals", CONFIG.VISUALS, function(v)
-    CONFIG.VISUALS = v
-    if r then r.Transparency = v and 0.3 or 1 end
-end)
+makeBtn(mainFrame, 26, "Auto Parry", CONFIG.ENABLED, function(v) CONFIG.ENABLED = v end)
+makeBtn(mainFrame, 58, "Aimbot Main", CONFIG.AIMBOT, function(v) CONFIG.AIMBOT = v end)
+
+local accLabel = Instance.new("TextLabel", mainFrame)
+accLabel.Size = UDim2.new(1, -16, 0, 16)
+accLabel.Position = UDim2.new(0, 8, 0, 92)
+accLabel.BackgroundTransparency = 1
+accLabel.Text = "Accuracy: " .. CONFIG.ACCURACY
+accLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
+accLabel.Font = Enum.Font.Gotham
+accLabel.TextSize = 10
+accLabel.TextXAlignment = Enum.TextXAlignment.Left
 
 local minimizeBtn = Instance.new("TextButton", mainFrame)
-minimizeBtn.Size = UDim2.new(0, 20, 0, 20)
-minimizeBtn.Position = UDim2.new(1, -24, 0, 2)
+minimizeBtn.Size = UDim2.new(0, 18, 0, 18)
+minimizeBtn.Position = UDim2.new(1, -22, 0, 2)
 minimizeBtn.Text = "—"
 minimizeBtn.Font = Enum.Font.GothamBold
-minimizeBtn.TextSize = 12
+minimizeBtn.TextSize = 11
 minimizeBtn.TextColor3 = Color3.new(1, 1, 1)
-minimizeBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+minimizeBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
 minimizeBtn.BorderSizePixel = 0
 Instance.new("UICorner", minimizeBtn).CornerRadius = UDim.new(0, 4)
 local minimized = false
 minimizeBtn.MouseButton1Click:Connect(function()
     minimized = not minimized
-    mainFrame.Size = minimized and UDim2.new(0, 160, 0, 24) or UDim2.new(0, 160, 0, 150)
+    mainFrame.Size = minimized and UDim2.new(0, 150, 0, 22) or UDim2.new(0, 150, 0, 120)
     minimizeBtn.Text = minimized and "+" or "—"
-end)
-
-task.spawn(function()
-    local method = "none"
-    if pcall(function() return firesignal end) and firesignal then
-        method = "firesignal"
-    elseif pcall(function() return fireclick end) and fireclick then
-        method = "fireclick"
-    elseif pcall(function() return getconnections end) and getconnections then
-        method = "getconnections"
-    end
-    statusLabel.Text = "Method: " .. method
 end)
 
 RunService.RenderStepped:Connect(function()
@@ -375,26 +312,14 @@ if BallsFolder then
 end
 
 RunService.PostSimulation:Connect(function()
-    if not CONFIG.ENABLED then
-        if r then r.Transparency = 1 end
-        return
-    end
-    if not isAlive() then
-        if r then r.Transparency = 1 end
-        return
-    end
+    if not CONFIG.ENABLED then return end
+    if not isAlive() then return end
 
     local Root = getHRP()
-    if not Root then
-        if r then r.Transparency = 1 end
-        return
-    end
+    if not Root then return end
 
     local Ball = GetBall()
-    if not Ball then
-        if r then r.Transparency = 1 end
-        return
-    end
+    if not Ball then return end
 
     local BallPos = Ball.Position
     local PlayerPos = Root.Position
@@ -454,15 +379,6 @@ RunService.PostSimulation:Connect(function()
 
     prevHighlighted = nowHL
 
-    frameCounter = frameCounter + 1
-    if r and frameCounter % 2 == 0 then
-        if Targeted then
-            UpdateVisuals(Root, Distance, clashMode and "clash" or "target")
-        else
-            if r then r.Transparency = 1 end
-        end
-    end
-
     if not Targeted then
         LastBallHit = nil
         return
@@ -477,13 +393,12 @@ RunService.PostSimulation:Connect(function()
 
     local Ping = (NetworkStats and NetworkStats:GetValue() / 1000) or 0.04
     local PingMs = Ping * 1000
-    local TriggerRadius = ComputeV1Radius(Speed, PingMs)
+    local TriggerRadius = ComputeRadius(Speed, PingMs, CONFIG.ACCURACY)
 
     if TriggerRadius < 5 then TriggerRadius = 5 end
     if TriggerRadius > 300 then TriggerRadius = 300 end
 
     local ETA = Distance / Speed
-
     local etaThresh = TriggerRadius / Speed
     local leadTime = 0.012 + math.min(Speed / 50000, 0.008)
     etaThresh = etaThresh + leadTime
