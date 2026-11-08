@@ -3,11 +3,15 @@ local CONFIG = {
     ENABLED = true,
     AIMBOT = true,
     AIMBOT_SMOOTHNESS = 0.15,
+    WALK = true,
+    WALK_MAX_DIST = 100,
+    WALK_MIN_DIST = 20,
+    WALK_SPEED = 16,
     MAX_RANGE = 200,
     CLASH_DISTANCE = 22,
     CLASH_SPEED = 0.01,
     NORMAL_SPEED = 0.05,
-    ACCURACY = 2.0,
+    ACCURACY = 3.0,
 }
 
 local Players = game:GetService("Players")
@@ -333,8 +337,8 @@ screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = CoreGui
 
 local mainFrame = Instance.new("Frame", screenGui)
-mainFrame.Size = UDim2.new(0, 130, 0, 90)
-mainFrame.Position = UDim2.new(0, 8, 0.5, -45)
+mainFrame.Size = UDim2.new(0, 130, 0, 124)
+mainFrame.Position = UDim2.new(0, 8, 0.5, -62)
 mainFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
 mainFrame.BackgroundTransparency = 0.05
 mainFrame.BorderSizePixel = 0
@@ -389,6 +393,7 @@ end
 
 makeToggle(mainFrame, 20, "Parry", CONFIG.ENABLED, function(v) CONFIG.ENABLED = v end)
 makeToggle(mainFrame, 54, "Aimbot", CONFIG.AIMBOT, function(v) CONFIG.AIMBOT = v end)
+makeToggle(mainFrame, 88, "Walk", CONFIG.WALK, function(v) CONFIG.WALK = v end)
 
 RunService.RenderStepped:Connect(function()
     if not CONFIG.AIMBOT then return end
@@ -400,6 +405,71 @@ RunService.RenderStepped:Connect(function()
     local targetPos = mainHrp.Position + Vector3.new(0, 1.5, 0)
     local targetCF = CFrame.lookAt(Camera.CFrame.Position, targetPos)
     Camera.CFrame = Camera.CFrame:Lerp(targetCF, CONFIG.AIMBOT_SMOOTHNESS)
+end)
+
+local function getClosestOther(myPos, ignoreMain)
+    local minDist = math.huge
+    if not Alive then return minDist end
+    for _, c in Alive:GetChildren() do
+        if c ~= LocalPlayer.Character then
+            if ignoreMain and c.Name == CONFIG.MAIN_ACCOUNT then continue end
+            local hrp = c:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local d = (myPos - hrp.Position).Magnitude
+                if d < minDist then minDist = d end
+            end
+        end
+    end
+    return minDist
+end
+
+RunService.Heartbeat:Connect(function()
+    if not CONFIG.WALK then return end
+    if not isAlive() then return end
+    local myHrp = getHRP()
+    if not myHrp then return end
+    local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return end
+    local mainHrp = getMainHRP()
+    if not mainHrp then return end
+
+    local myPos = myHrp.Position
+    local targetPos = mainHrp.Position
+    local diff = targetPos - myPos
+    local dist = diff.Magnitude
+
+    local dirFlat = Vector3.new(diff.X, 0, diff.Z)
+    if dirFlat.Magnitude > 0.1 then
+        myHrp.CFrame = CFrame.new(myPos, myPos + dirFlat)
+    end
+
+    local nearestOther = getClosestOther(myPos, true)
+    local tooCloseToOther = nearestOther < CONFIG.WALK_MIN_DIST
+
+    if tooCloseToOther then
+        local awayDir = Vector3.zero
+        for _, c in Alive:GetChildren() do
+            if c ~= LocalPlayer.Character and c.Name ~= CONFIG.MAIN_ACCOUNT then
+                local hrp = c:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local d = (myPos - hrp.Position)
+                    if d.Magnitude < CONFIG.WALK_MIN_DIST and d.Magnitude > 0.1 then
+                        awayDir = awayDir + d.Unit
+                    end
+                end
+            end
+        end
+        if awayDir.Magnitude > 0.1 then
+            hum:Move(Vector3.new(awayDir.X, 0, awayDir.Z).Unit)
+        end
+        return
+    end
+
+    if dist > CONFIG.WALK_MAX_DIST then
+        hum:Move(dirFlat.Unit)
+    else
+        hum:Move(Vector3.zero)
+    end
 end)
 
 if BallsFolder then
