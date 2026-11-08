@@ -13,7 +13,6 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Stats = game:GetService("Stats")
-local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local LocalPlayer = Players.LocalPlayer
 local lastParryTick = 0
@@ -71,16 +70,28 @@ local function getBallFrom(ball)
     return ""
 end
 
+local function getBlockButton()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return nil end
+    local hotbar = pg:FindFirstChild("Hotbar")
+    if not hotbar then return nil end
+    return hotbar:FindFirstChild("Block")
+end
+
 local function doParry()
     if isParrying then return end
     local now = tick()
     if (now - lastParryTick) < CONFIG.PARRY_COOLDOWN then return end
     isParrying = true
     lastParryTick = now
-    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.F, false, game)
-    task.defer(function()
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.F, false, game)
-    end)
+
+    local btn = getBlockButton()
+    if btn then
+        for _, c in pairs(getconnections(btn.Activated)) do c:Fire() end
+        for _, c in pairs(getconnections(btn.MouseButton1Click)) do c:Fire() end
+        for _, c in pairs(getconnections(btn.MouseButton1Down)) do c:Fire() end
+    end
+
     task.delay(CONFIG.PARRY_COOLDOWN, function()
         isParrying = false
     end)
